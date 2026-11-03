@@ -307,6 +307,8 @@ function container.build(env, pins, id)
     data.save(tmp .. "/meta.lua", {
         id = id, env = env.name, target = "container", teken = version.number, image = tag,
         created = os.date("!%Y-%m-%dT%H:%M:%SZ"), steps = {},
+        container = env.container, state = env.state, verify = env.verify,
+        has_start = true,
     })
     ok, err = os.rename(tmp, final)
     if ok == nil then
@@ -318,10 +320,23 @@ function inside(path, dir)
     return path == dir or string.sub(path, 1, string.len(dir) + 1) == dir .. "/"
 end
 
+-- How generation `id` runs: its container section, state and verify
+-- commands as recorded at build time, so activating an older
+-- generation (rollback) uses its own name, mounts and checks, not the
+-- current spec's. `has_start`: the image runs /opt/teken/start (built
+-- by teken 0.3.0 or later), so the health check waits for it.
+function run_of(env, id)
+    meta = store.meta(env.name, id)
+    if meta == nil or meta.container == nil then
+        return {container = env.container, state = env.state, verify = env.verify, has_start = true}
+    end
+    return {container = meta.container, state = meta.state, verify = meta.verify, has_start = meta.has_start == true}
+end
+
 -- Changes in the running container's own layer that a swap would lose:
 -- everything podman diff reports outside declared state, `ephemeral`
 -- and SCRATCH, minus directories listed only because something below
--- them changed.
+-- them changed. `env` needs only `container` and `state`.
 function container.undeclared(env, name)
     allowed = {}
     for _, path in ipairs(SCRATCH) do
@@ -387,9 +402,9 @@ function host_expand(text)
     return result
 end
 
-function create_args(env, tag)
-    c = env.container
-    args = {"--name " .. shell.quote(c.name .. "-next"), "--label teken.env=" .. shell.quote(env.name)}
+function create_args(env_name, run, tag)
+    c = run.container
+    args = {"--name " .. shell.quote(c.name .. "-next"), "--label teken.env=" .. shell.quote(env_name)}
     if c.hostname != nil then
         table.insert(args, "--hostname " .. shell.quote(c.hostname))
     end
@@ -404,7 +419,7 @@ function create_args(env, tag)
             table.insert(args, "--publish " .. shell.quote(port))
         end
     end
-    for _, state in ipairs(env.state) do
+    for _, state in ipairs(run.state) do
         source = state.volume
         if source == nil then
             source = state.bind
@@ -445,9 +460,10 @@ function is_running(name)
 end
 
 -- Waits until the entrypoint (/opt/teken/start) reports done, for at
--- most container.start_timeout seconds. A failed start, or a container
--- that stopped, fails the health check.
-function wait_for_start(env, name)
+-- most `c.start_timeout` seconds (`c`: the generation's container
+-- section). A failed start, or a container that stopped, fails the
+-- health check.
+function wait_for_start(c, name)
     waited = 0
     while true do
         status = ""
@@ -465,7 +481,11 @@ function wait_for_start(env, name)
         if status == "failed" then
             error("health check failed: the start of " .. name .. " failed (podman logs " .. name .. ")", 0)
         end
-        if waited >= env.container.start_timeout then
+        timeout = c.start_timeout
+        if timeout == nil then
+            timeout = 300
+        end
+        if waited >= timeout then
             error("health check failed: " .. name .. " did not finish starting in " .. waited .. "s", 0)
         end
         shell.run("sleep 1")
@@ -474,15 +494,22 @@ function wait_for_start(env, name)
 end
 
 function container.activate(env, from, to, options)
-    name = env.container.name
+    run = run_of(env, to)
+    name = run.container.name
     tag = container.tag(env.name, to)
-    if from == nil and exists(name) then
+    old = nil
+    old_run = nil
+    if from != nil then
+        old_run = run_of(env, from)
+        old = old_run.container.name
+    end
+    if exists(name) and name != old then
         error("a container named " .. name .. " exists that teken did not create; rename or remove it first", 0)
     end
-    if exists(name) and (options == nil or options.discard_undeclared != true) then
-        lost = container.undeclared(env, name)
+    if old != nil and exists(old) and (options == nil or options.discard_undeclared != true) then
+        lost = container.undeclared(old_run, old)
         if #lost > 0 then
-            error("the running " .. name .. " has changes outside declared state, which the switch would lose:\n  "
+            error("the running " .. old .. " has changes outside declared state, which the switch would lose:\n  "
                 .. table.concat(lost, "\n  ")
                 .. "\ndeclare them as state (or container.ephemeral), or pass --discard-undeclared", 0)
         end
@@ -490,23 +517,25 @@ function container.activate(env, from, to, options)
     if exists(name .. "-next") then
         podman("rm --force " .. shell.quote(name .. "-next"), "podman rm " .. name .. "-next")
     end
-    podman("create " .. create_args(env, tag), "podman create " .. name .. "-next")
-    if exists(name) then
-        podman("stop " .. shell.quote(name), "podman stop " .. name)
-        podman("rename " .. shell.quote(name) .. " " .. shell.quote(name .. "-" .. from), "podman rename " .. name)
+    podman("create " .. create_args(env.name, run, tag), "podman create " .. name .. "-next")
+    if old != nil and exists(old) then
+        podman("stop " .. shell.quote(old), "podman stop " .. old)
+        podman("rename " .. shell.quote(old) .. " " .. shell.quote(old .. "-" .. from), "podman rename " .. old)
     end
     podman("rename " .. shell.quote(name .. "-next") .. " " .. shell.quote(name), "podman rename " .. name .. "-next")
     podman("start " .. shell.quote(name), "podman start " .. name)
     store.set_current(env.name, to)
     print("health check")
-    wait_for_start(env, name)
-    if env.container.health_wait > 0 then
-        shell.run("sleep " .. env.container.health_wait)
+    if run.has_start then
+        wait_for_start(run.container, name)
+    end
+    if run.container.health_wait > 0 then
+        shell.run("sleep " .. run.container.health_wait)
     end
     if is_running(name) == false then
         error("health check failed: " .. name .. " is not running", 0)
     end
-    for _, cmd in ipairs(env.verify) do
+    for _, cmd in ipairs(run.verify) do
         print("  ? " .. cmd)
         if shell.run("podman exec " .. verify_prefix() .. shell.quote(name) .. " sh -c " .. shell.quote(cmd)) != true then
             error("health check failed: " .. cmd, 0)
@@ -515,10 +544,10 @@ function container.activate(env, from, to, options)
 end
 
 -- Undoes an activation recorded as {from, to}, from any point it
--- reached: the new container gone, the old one back under the name and
+-- reached: the new container gone, the old one back under its name and
 -- running.
 function container.rollback(env, intent)
-    name = env.container.name
+    name = run_of(env, intent.to).container.name
     if exists(name .. "-next") then
         podman("rm --force " .. shell.quote(name .. "-next"), "podman rm " .. name .. "-next")
     end
@@ -526,12 +555,13 @@ function container.rollback(env, intent)
         podman("rm --force " .. shell.quote(name), "podman rm " .. name)
     end
     if intent.from != nil then
-        old = name .. "-" .. intent.from
-        if exists(old) and exists(name) == false then
-            podman("rename " .. shell.quote(old) .. " " .. shell.quote(name), "podman rename " .. old)
+        old = run_of(env, intent.from).container.name
+        aside = old .. "-" .. intent.from
+        if exists(aside) and exists(old) == false then
+            podman("rename " .. shell.quote(aside) .. " " .. shell.quote(old), "podman rename " .. aside)
         end
-        if exists(name) then
-            podman("start " .. shell.quote(name), "podman start " .. name)
+        if exists(old) then
+            podman("start " .. shell.quote(old), "podman start " .. old)
         end
     end
     store.set_current(env.name, intent.from)
@@ -543,9 +573,9 @@ function container.commit(env, from, to)
     if from == nil then
         return
     end
-    old = env.container.name .. "-" .. from
-    if exists(old) then
-        podman("rm --force " .. shell.quote(old), "podman rm " .. old)
+    aside = run_of(env, from).container.name .. "-" .. from
+    if exists(aside) then
+        podman("rm --force " .. shell.quote(aside), "podman rm " .. aside)
     end
 end
 

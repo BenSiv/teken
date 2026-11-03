@@ -210,3 +210,21 @@ LUA
     [ ! -L "$HOME/.hello-build" ]
     [ -d "$WORK/home/Projects/hello" ]
 }
+
+@test "rolling back to a generation from before runtime start does not wait for it" {
+    box_unit <<LUA
+    files = {{path = "files/v", content = "one"}},
+LUA
+    box_env
+    "$TKN" switch envs/test.lua -y
+    first="$(active)"
+    # As recorded by teken 0.2: no start script in the image.
+    sed -i '/has_start/d' "$TEKEN_STATE/envs/test/gens/$first/meta.lua"
+    ! grep -q has_start "$TEKEN_STATE/envs/test/gens/$first/meta.lua"
+    sed -i 's/"one"/"two"/' units/box.lua
+    "$TKN" switch envs/test.lua -y
+    # A start that never reports would time out if it were waited for.
+    FAKE_START=running run "$TKN" rollback envs/test.lua -y
+    [ "$status" -eq 0 ]
+    [ "$(active)" = "$first" ]
+}

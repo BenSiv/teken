@@ -2,3 +2,5 @@ bin/
 obj/
 tst/integration/.tmp-*/
 src/build_commit.lua
+
+tst/smoke/lock.lua

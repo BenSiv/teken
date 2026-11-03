@@ -173,7 +173,7 @@ eval -> lock -> build -> verify -> activate -> health -> commit
 | build | Produce the generation in isolation, steps cached by input hash | Active env untouched; partial build discarded |
 | verify | Run `verify` commands inside the candidate, without live state | Active env untouched; candidate kept for inspection |
 | activate | The target's atomic switch, after an intent record is written | Target switches back |
-| health | Run `verify` again against the live generation | Target switches back |
+| health | Run the generation's own `verify` (recorded in its `meta.lua` at build) against it live | Target switches back |
 | commit | Mark the generation active; remove generations beyond `keep` | -- |
 
 The **generation id** is a hash of the resolved env (after var expansion),
@@ -181,6 +181,14 @@ the lock entries it uses, the contents of every spec file it reads, and
 the teken version. The same spec and lock always give the same id, so
 `tkn switch` on an unchanged spec is a no-op, and `tkn status` reports
 drift by comparing the active id with the one the spec would build.
+
+A generation records how it runs (its verify commands and env vars, its
+state and `repos`; for a container, its container section, state mounts
+and whether its image has a [start](#runtime-start) script to wait for)
+in `meta.lua`.
+Activation always uses the record of the generation being activated, so
+`tkn rollback` brings back the old generation exactly as it was built,
+even after the spec has moved on.
 
 ### Intent records and crash recovery
 

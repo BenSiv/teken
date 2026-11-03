@@ -39,3 +39,6 @@ Requires `bats` and `git` on PATH.
 Runs the unit tests (`tst/unit/*.lua`) and the integration tests
 (`tst/integration/*.bats`), which drive the built binary against a
 scratch `$HOME`, a scratch store and local git repos.
+
+[tst/smoke/](tst/smoke/README.md) is a manual test on a real machine,
+with real podman, for both targets.

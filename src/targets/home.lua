@@ -115,16 +115,15 @@ function env_script(env)
     return table.concat(lines, "\n") .. "\n"
 end
 
--- Runs the env's verify commands against generation directory `gen`,
--- its bin/ first on PATH and its env vars set. Returns the first
--- failing command, or nil.
-function run_verify(env, gen)
+-- Runs `verify` against generation directory `gen`, its bin/ first on
+-- PATH and `vars` set. Returns the first failing command, or nil.
+function run_verify(verify, vars, gen)
     prefix = ""
-    for _, name in ipairs(data.sorted_keys(env.env)) do
-        prefix = prefix .. name .. "=" .. shell.quote(env.env[name]) .. " "
+    for _, name in ipairs(data.sorted_keys(vars)) do
+        prefix = prefix .. name .. "=" .. shell.quote(vars[name]) .. " "
     end
     prefix = prefix .. "TEKEN_GEN=" .. shell.quote(gen) .. " PATH=" .. shell.quote(gen .. "/bin") .. ":\"$PATH\" "
-    for _, cmd in ipairs(env.verify) do
+    for _, cmd in ipairs(verify) do
         print("  ? " .. cmd)
         if shell.run(prefix .. "sh -c " .. shell.quote(cmd)) != true then
             return cmd
@@ -209,9 +208,10 @@ function home.build(env, pins, id)
     data.save(tmp .. "/meta.lua", {
         id = id, env = env.name, target = "home", teken = version.number,
         created = os.date("!%Y-%m-%dT%H:%M:%SZ"), steps = step_ids, links = links,
+        verify = env.verify, vars = env.env, state = env.state, repos = env.repos,
     })
     print("verifying")
-    failed = run_verify(env, tmp)
+    failed = run_verify(env.verify, env.env, tmp)
     if failed != nil then
         error("verify failed: " .. failed .. "\nthe candidate is kept at " .. tmp, 0)
     end
@@ -324,11 +324,11 @@ end
 
 -- Activation ---------------------------------------------------------
 
--- Clones each declared repo whose path is missing. Never touches an
--- existing checkout; a failed clone is a warning (the next switch
--- retries), not a reason to roll back.
-function clone_repos(env)
-    for _, repo in ipairs(env.repos) do
+-- Clones each repo whose path is missing. Never touches an existing
+-- checkout; a failed clone is a warning (the next switch retries), not
+-- a reason to roll back.
+function clone_repos(repos)
+    for _, repo in ipairs(repos) do
         if lfs.symlinkattributes(repo.path) == nil then
             print("  cloning " .. repo.git .. " into " .. repo.path)
             shell.mkdir(shell.parent(repo.path))
@@ -339,15 +339,30 @@ function clone_repos(env)
     end
 end
 
+-- The state, repos, verify commands and vars are the ones recorded in
+-- the generation, not the spec's: a rollback activates the old
+-- generation as it was built, and checks it against what it was built
+-- to pass.
 function home.activate(env, from, to)
-    for _, state in ipairs(env.state) do
-        shell.mkdir(state.path)
+    meta = store.meta(env.name, to)
+    if meta.state != nil then
+        for _, state in ipairs(meta.state) do
+            shell.mkdir(state.path)
+        end
     end
-    clone_repos(env)
+    if meta.repos != nil then
+        clone_repos(meta.repos)
+    end
     store.set_current(env.name, to)
     switch_links(env.name, from, to)
     print("health check")
-    failed = run_verify(env, store.current_path(env.name))
+    verify = meta.verify
+    vars = meta.vars
+    if verify == nil then
+        verify = {}
+        vars = {}
+    end
+    failed = run_verify(verify, vars, store.current_path(env.name))
     if failed != nil then
         error("health check failed: " .. failed, 0)
     end
