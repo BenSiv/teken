@@ -58,7 +58,7 @@ reads `envs/<hostname>.lua` from the current directory (like seder).
 ```lua
 -- envs/devenv.lua
 return {
-    requires_teken = "0.2.0",
+    requires_teken = "0.3.0",
     target = "container",
     vars = {rnd_path = "~/rnd"},
     units = {"base-tools", "cloud-clis", "luam-stack", "python", "dotfiles"},
@@ -86,8 +86,14 @@ return {
 
 `container` fields: `name` and `base` (required), `hostname`, `ports`,
 `tty`, `restart`, `command`, `home` (default `/root`), `ephemeral` (see
-[Activate](#target-container)) and `health_wait` (seconds before the
-health check, default 3).
+[Activate](#target-container)), `health_wait` (seconds before the
+health check, default 3), `start_timeout` (seconds the health check
+waits for [start](#runtime-start), default 300), `passenv` (host
+environment variables passed through when the container is created)
+and `sockets` (host paths, `$VAR` expanded from tkn's environment when
+the container is created, bind-mounted at the same path; skipped when
+missing). `passenv` and `sockets` belong to the session running tkn, so
+their values are not part of the generation.
 
 `vars` work as in seder: `${name}` from `vars` plus built-ins (`home`,
 `user`, `uid`, `env` for the env's name), and a leading `~/` becomes the
@@ -126,9 +132,11 @@ return {
 | `sources` | Git repos, pinned to a commit by the lock, used by builds | both |
 | `build` | Commands run in a source; `install` copies outputs into the generation | both |
 | `files` | Files placed in the generation (`path`, then `source` in the spec or inline `content`; `mode`) | both |
-| `links` | Paths outside the generation (`path`) that point into it (`target`, relative to the generation) | home |
+| `links` | Paths outside the generation (`path`) that point into it (`target`, relative to the generation), or into state (an absolute `target` inside a state path) | both |
 | `env` | Environment variables for the env's shell | both |
 | `verify` | Commands that must exit 0 in the built generation | both |
+| `repos` | Checkouts (`path` inside a state path, `git`), cloned only when the path is missing | both |
+| `start` | Commands run on every container start (`name`, `cmd`, `background`) | container |
 
 A unit that uses a field its env's target can't handle is a load error
 that names the unit and field.
@@ -259,11 +267,31 @@ the previous image; nothing is lost, since state lives on the declared
 volumes and bind mounts. Images of generations that drop out of `keep`
 are removed.
 
-**Runtime start (not built yet):** a generated `/opt/teken/start`
-entrypoint for what can't be baked into the image: ensure state paths
-exist, clone missing state repos, create links into bind mounts, run
-declared `start` commands, then `exec` the command. Idempotent; never
-builds.
+### Runtime start
+
+What can't be baked into the image happens when the container starts,
+in a generated entrypoint, `/opt/teken/start` (kept as `gens/<id>/start`
+and checked with `sh -n` before the image build). On every start it:
+
+1. creates the state paths;
+2. clones each `repos` entry whose path is missing. A failed clone (no
+   network, no credentials yet) is a warning: the next start retries;
+3. runs the `start` entries in order. A failing one stops the start;
+   `background = true` runs an entry detached, logged to
+   `/var/log/teken/<name>.log`, and never restarted if it dies;
+4. execs the container's command (`bash` when there is none).
+
+It writes `running`, then `done` or `failed`, to `/run/teken/start.status`.
+The health check waits for `done` (at most `start_timeout` seconds), so a
+failed start, or a container that stops while starting, rolls the switch
+back. `start` entries run again on every restart and must be idempotent.
+They may change state (restore a database into a volume); rollback does
+not undo that.
+
+Links into state (an absolute `target`) are symlinks baked into the
+image; they dangle until the state is mounted. A file something writes
+over one of them later is a change in the container's own layer, so the
+next switch lists it before it would be lost.
 
 ## Target: home
 
@@ -279,13 +307,16 @@ locked commit (not hermetic: they see the host's compilers, libraries
 and `$HOME`). Step outputs are cached in `~/.local/state/teken/steps/<hash>/`
 and reused across generations and envs.
 
-**Activate:** `~/.local/state/teken/envs/<env>/current` is a symlink to the
+**Activate:** state paths are created and missing `repos` cloned (a
+failed clone is a warning). `~/.local/state/teken/envs/<env>/current` is a symlink to the
 active generation. Activation creates `current.new` pointing at the new
 one and `rename(2)`s it over `current`, which is atomic. Every declared
 link points through `current`
 (`~/.bashrc -> ~/.local/state/teken/envs/home/current/files/bashrc`), and one
 PATH entry covers all binaries (`.../current/bin`), so the whole content
-of the environment changes in that one rename.
+of the environment changes in that one rename. A link into state (an
+absolute target) points straight at its target and is placed, adopted
+and dropped like the others.
 
 ### The link set
 
@@ -310,9 +341,8 @@ not inside a generation). teken:
 
 - refuses an env whose `files`, `links` or `install` paths fall inside a
   state path, or the other way around;
-- creates missing state paths on first activation, and clones state repos
-  (`{path = "/root/src/software", git = "..."}`) only when the path is
-  missing;
+- creates missing state paths on activation (home) or start (container),
+  and clones `repos` entries only when their path is missing;
 - never modifies, pulls or deletes inside a state path.
 
 Data migrations (a schema change in a state database) are out of scope
@@ -390,6 +420,8 @@ Adding a target (a bootc host, a remote machine) means adding one module.
   built as an image and switched with bootc.
 - Remote hosts, inventories, fleets.
 - Data migrations (see [State](#state)).
+- Supervising start's background entries (restarts, health), and
+  `start` for home envs.
 
 ## Open questions
 

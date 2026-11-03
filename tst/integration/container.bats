@@ -60,7 +60,7 @@ running() {
 }
 
 containers() {
-    ls "$PODMAN_STATE/containers" | grep -v '\.diff$' | tr '\n' ' '
+    ls "$PODMAN_STATE/containers" | grep -v '\.diff$\|\.status$' | tr '\n' ' '
 }
 
 @test "the base image must be pinned" {

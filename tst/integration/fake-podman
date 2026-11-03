@@ -49,7 +49,7 @@ case "$cmd" in
         while [ $# -gt 0 ]; do
             case "$1" in
                 --name) name="$2"; shift 2 ;;
-                --label|--hostname|--restart|--publish|--volume) shift 2 ;;
+                --label|--hostname|--restart|--publish|--volume|--env) shift 2 ;;
                 --tty) shift ;;
                 *) image="$1"; break ;;
             esac
@@ -61,8 +61,10 @@ case "$cmd" in
         [ "$1" = exists ] && [ -f "$(container "$2")" ]
         ;;
     start)
+        # The entrypoint's outcome: FAKE_START=failed makes it fail.
         [ -f "$(container "$1")" ] || exit 1
         sed -i 's/^running=.*/running=true/' "$(container "$1")"
+        echo "${FAKE_START:-done}" > "$(container "$1").status"
         ;;
     stop)
         [ -f "$(container "$1")" ] || exit 1
@@ -73,11 +75,12 @@ case "$cmd" in
         [ -f "$(container "$2")" ] && exit 1
         mv "$(container "$1")" "$(container "$2")"
         [ -f "$(container "$1").diff" ] && mv "$(container "$1").diff" "$(container "$2").diff"
+        [ -f "$(container "$1").status" ] && mv "$(container "$1").status" "$(container "$2").status"
         true
         ;;
     rm)
         [ "$1" = --force ] && shift
-        rm -f "$(container "$1")" "$(container "$1").diff"
+        rm -f "$(container "$1")" "$(container "$1").diff" "$(container "$1").status"
         ;;
     inspect)
         [ -f "$(container "$3")" ] || exit 1
@@ -87,6 +90,10 @@ case "$cmd" in
         esac
         ;;
     exec)
+        if [ "$3" = /run/teken/start.status ]; then
+            cat "$(container "$1").status" 2>/dev/null || echo running
+            exit 0
+        fi
         while [ "$1" != "-c" ]; do shift; done
         FAKE_IN=live sh -c "$2"
         ;;

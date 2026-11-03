@@ -18,8 +18,8 @@ ENV_KEYS = {
 BOTH = {home = true, container = true}
 
 -- Unit fields and the targets that can use them. Everything but apt
--- works for both, so a unit (luam-stack, dotfiles) serves a home env and
--- a container env alike.
+-- and start works for both, so a unit (luam-stack, dotfiles) serves a
+-- home env and a container env alike.
 UNIT_FIELDS = {
     apt = {container = true},
     sources = BOTH,
@@ -29,6 +29,8 @@ UNIT_FIELDS = {
     links = BOTH,
     env = BOTH,
     verify = BOTH,
+    repos = BOTH,
+    start = {container = true},
 }
 
 TARGETS = {home = true, container = true}
@@ -37,7 +39,8 @@ TARGETS = {home = true, container = true}
 CONTAINER_FIELDS = {
     name = "string", base = "string", hostname = "string", ports = "table",
     tty = "boolean", restart = "string", command = "table", home = "string",
-    ephemeral = "table", health_wait = "number",
+    ephemeral = "table", health_wait = "number", start_timeout = "number",
+    passenv = "table", sockets = "table",
 }
 
 ITEM_FIELDS = {
@@ -49,6 +52,8 @@ ITEM_FIELDS = {
     fetch = {url = "string", path = "string", mode = "string"},
     files = {path = "string", source = "string", content = "string", mode = "string"},
     links = {path = "string", target = "string"},
+    repos = {path = "string", git = "string"},
+    start = {name = "string", cmd = "string", background = "boolean"},
 }
 
 REQUIRED = {
@@ -57,6 +62,8 @@ REQUIRED = {
     fetch = {"url", "path"},
     files = {"path"},
     links = {"path", "target"},
+    repos = {"path", "git"},
+    start = {"name", "cmd"},
 }
 
 function fail(where, message)
@@ -196,7 +203,7 @@ function new_env(name, path, spec_dir, target)
     return {
         name = name, path = path, spec_dir = spec_dir, target = target,
         apt = {}, sources = {}, build = {}, fetch = {}, files = {}, links = {},
-        env = {}, verify = {}, state = {}, origin = {},
+        env = {}, verify = {}, state = {}, origin = {}, repos = {}, start = {},
     }
 end
 
@@ -226,13 +233,13 @@ function merge_unit(env, unit, unit_path, vars)
             env.origin["sources." .. name] = unit_path
         end
     end
-    for _, field in ipairs({"build", "fetch", "files", "links"}) do
+    for _, field in ipairs({"build", "fetch", "files", "links", "repos", "start"}) do
         if unit[field] != nil then
             if data.is_list(unit[field]) == false then
                 fail(unit_path, "'" .. field .. "' must be a list")
             end
             key = "path"
-            if field == "build" then
+            if field == "build" or field == "start" then
                 key = "name"
             end
             for index, item in ipairs(unit[field]) do
@@ -274,6 +281,16 @@ function merge_unit(env, unit, unit_path, vars)
             table.insert(env.verify, expand_string(cmd, vars, unit_path .. ": verify"))
         end
     end
+end
+
+-- Whether `path` is a declared state path or inside one.
+function in_state(env, path)
+    for _, state in ipairs(env.state) do
+        if inside(path, state.path) then
+            return true
+        end
+    end
+    return false
 end
 
 -- Checks that need the whole env: build steps name known sources and
@@ -328,11 +345,29 @@ function check_env(env)
     end
     for _, item in ipairs(env.links) do
         check_absolute(item.path, item.where)
-        check_relative(item.target, item.where)
+        -- A relative target is in the generation; an absolute one must be
+        -- in declared state (a checkout, a data directory).
+        if string.sub(item.target, 1, 1) == "/" then
+            if in_state(env, item.target) == false then
+                fail(item.where, "link target " .. item.target .. " is absolute but not inside a state path")
+            end
+        else
+            check_relative(item.target, item.where)
+        end
         for _, state in ipairs(env.state) do
             if inside(item.path, state.path) or inside(state.path, item.path) then
                 fail(item.where, "link " .. item.path .. " overlaps state path " .. state.path)
             end
+        end
+    end
+end
+
+-- Checkouts: absolute, inside state, one per path.
+function check_repos(env)
+    for _, item in ipairs(env.repos) do
+        check_absolute(item.path, item.where)
+        if in_state(env, item.path) == false then
+            fail(item.where, "repo path " .. item.path .. " must be inside a state path")
         end
     end
 end
@@ -385,6 +420,21 @@ function load_container(raw, env_path)
     end
     if raw.health_wait == nil then
         raw.health_wait = 3
+    end
+    if raw.start_timeout == nil then
+        raw.start_timeout = 300
+    end
+    for _, field in ipairs({"passenv", "sockets"}) do
+        if raw[field] != nil then
+            check_string_list(raw[field], env_path .. ": container." .. field)
+        end
+    end
+    if raw.passenv != nil then
+        for _, name in ipairs(raw.passenv) do
+            if string.match(name, "^[%a_][%w_]*$") == nil then
+                fail(env_path, "container.passenv: '" .. name .. "' is not a variable name")
+            end
+        end
     end
     return raw
 end
@@ -466,6 +516,7 @@ function loader.load(env_path)
         merge_unit(env, load_table(unit_path), unit_path, vars)
     end
     check_env(env)
+    check_repos(env)
     return env
 end
 

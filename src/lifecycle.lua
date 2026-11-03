@@ -74,6 +74,7 @@ function lifecycle.generation_id(env, pins)
         sources = sources, build = without_where(env.build), fetch = fetch,
         files = files, links = without_where(env.links), vars = env.env, verify = env.verify,
         apt = env.apt, container = env.container, state = env.state, image = image,
+        repos = without_where(env.repos), start = without_where(env.start),
     })
 end
 

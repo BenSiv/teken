@@ -4,8 +4,10 @@
 --
 --   0.1.0  home target: sources, build, fetch, files, links, env, verify
 --   0.2.0  container target: container section, apt, volume/bind state
+--   0.3.0  runtime start: repos, links into state, start, container
+--          passenv/sockets/start_timeout
 
-version = {number = "0.2.0"}
+version = {number = "0.3.0"}
 
 -- The commit the binary was built from; bld/build.sh writes
 -- src/build_commit.lua (untracked). A run from source has none. The

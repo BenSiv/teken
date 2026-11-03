@@ -86,6 +86,12 @@ function chmod(path, mode)
     end
 end
 
+-- An absolute target is in declared state (a checkout); a relative one
+-- is in the generation and goes through current.
+function is_state_target(target)
+    return string.sub(target, 1, 1) == "/"
+end
+
 -- Copies `from` to `gen`/`to`, refusing to overwrite: two declarations
 -- writing the same generation path is a spec error.
 function place(gen, from, to, where)
@@ -165,7 +171,7 @@ function assemble(env, pins, gen, steps, ids)
         chmod(dest, item.mode)
     end
     for _, item in ipairs(env.links) do
-        if lfs.symlinkattributes(gen .. "/" .. item.target) == nil then
+        if is_state_target(item.target) == false and lfs.symlinkattributes(gen .. "/" .. item.target) == nil then
             error(item.where .. ": link target " .. item.target .. " is not in the generation", 0)
         end
     end
@@ -219,13 +225,24 @@ end
 -- Links --------------------------------------------------------------
 
 function link_target(name, target)
+    if is_state_target(target) then
+        return target
+    end
     return store.current_path(name) .. "/" .. target
 end
 
-function is_ours(name, path)
-    target = lfs.symlinkattributes(path, "target")
+-- Whether the link at `link.path` is one teken placed: through current,
+-- or straight at the link's own state target.
+function is_ours(name, link)
+    target = lfs.symlinkattributes(link.path, "target")
+    if target == nil then
+        return false
+    end
+    if is_state_target(link.target) and target == link.target then
+        return true
+    end
     prefix = store.current_path(name) .. "/"
-    return target != nil and string.sub(target, 1, string.len(prefix)) == prefix
+    return string.sub(target, 1, string.len(prefix)) == prefix
 end
 
 function adopted_path(name, path)
@@ -245,7 +262,7 @@ function place_link(name, link)
         return
     end
     if lfs.symlinkattributes(link.path) != nil then
-        if is_ours(name, link.path) then
+        if is_ours(name, link) then
             os.remove(link.path)
         else
             keep = adopted_path(name, link.path)
@@ -263,9 +280,11 @@ function place_link(name, link)
     end
 end
 
--- Removes our link at `path` and puts back what it adopted, if anything.
-function drop_link(name, path)
-    if is_ours(name, path) then
+-- Removes our link at `link.path` and puts back what it adopted, if
+-- anything.
+function drop_link(name, link)
+    path = link.path
+    if is_ours(name, link) then
         os.remove(path)
     end
     keep = adopted_path(name, path)
@@ -298,14 +317,33 @@ function switch_links(name, from, to)
     end
     for _, link in ipairs(links_of(name, from)) do
         if wanted[link.path] != true then
-            drop_link(name, link.path)
+            drop_link(name, link)
         end
     end
 end
 
 -- Activation ---------------------------------------------------------
 
+-- Clones each declared repo whose path is missing. Never touches an
+-- existing checkout; a failed clone is a warning (the next switch
+-- retries), not a reason to roll back.
+function clone_repos(env)
+    for _, repo in ipairs(env.repos) do
+        if lfs.symlinkattributes(repo.path) == nil then
+            print("  cloning " .. repo.git .. " into " .. repo.path)
+            shell.mkdir(shell.parent(repo.path))
+            if shell.run("git clone --quiet " .. shell.quote(repo.git) .. " " .. shell.quote(repo.path)) != true then
+                print("  WARNING: could not clone " .. repo.git .. "; the next switch tries again")
+            end
+        end
+    end
+end
+
 function home.activate(env, from, to)
+    for _, state in ipairs(env.state) do
+        shell.mkdir(state.path)
+    end
+    clone_repos(env)
     store.set_current(env.name, to)
     switch_links(env.name, from, to)
     print("health check")
