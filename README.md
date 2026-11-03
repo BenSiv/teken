@@ -17,3 +17,25 @@ yours: keep it in its own repo and point `tkn` at it.
 Written in [luam](https://github.com/BenSiv/luam).
 
 - Design: [doc/design.md](doc/design.md)
+
+## Building
+
+Requires a built [luam](https://github.com/BenSiv/luam) checkout
+(`obj/liblua.a` present). `bld/build.sh` looks for it at `../luam`;
+override with `LUAM_DIR`.
+
+```sh
+./bld/build.sh          # -> bin/tkn
+```
+
+## Testing
+
+Requires `bats` and `git` on PATH.
+
+```sh
+./bld/test.sh
+```
+
+Runs the unit tests (`tst/unit/*.lua`) and the integration tests
+(`tst/integration/*.bats`), which drive the built binary against a
+scratch `$HOME`, a scratch store and local git repos.

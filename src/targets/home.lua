@@ -1,0 +1,375 @@
+-- The home target: a generation is a directory in the store (bin/,
+-- files/, env.sh, meta.lua), and the active one is whatever the env's
+-- `current` symlink points at. Declared links point through `current`,
+-- so the content of every link and every binary on PATH changes in the
+-- one rename that moves `current`. Which links exist is not atomic:
+-- links are placed and dropped after that rename, and rollback undoes
+-- both from the intent record (see doc/design.md, "The link set").
+
+lfs = require("lfs")
+data = require("data")
+shell = require("shell")
+hash = require("hash")
+store = require("store")
+lock = require("lock")
+version = require("version")
+
+home = {}
+
+-- Build steps, each with its id: the step as declared, its source at
+-- the pinned commit, and the ids of the steps it needs. Equal inputs
+-- give the same id, so a finished step is reused by every generation
+-- and env that declares it the same way.
+function home.steps(env, pins)
+    ids = {}
+    result = {}
+    for _, step in ipairs(env.build) do
+        needs = {}
+        if step.needs != nil then
+            for _, need in ipairs(step.needs) do
+                needs[need] = ids[need]
+            end
+        end
+        pin = pins.sources[step.from]
+        id = hash.id({
+            teken = version.number, name = step.name, cmd = step.cmd, env = step.env,
+            install = step.install, source = {git = pin.git, commit = pin.commit}, needs = needs,
+        })
+        ids[step.name] = id
+        dir = store.root() .. "/steps/" .. id
+        table.insert(result, {step = step, id = id, dir = dir,
+            cached = lfs.attributes(dir .. "/done") != nil})
+    end
+    return result, ids
+end
+
+-- A bare mirror of `source` holding `commit`, fetched only when the
+-- commit is not there yet.
+function mirror(name, source, commit)
+    dir = store.cache_dir("git") .. "/" .. name .. "-" .. hash.id(source.git)
+    if lfs.attributes(dir) == nil then
+        shell.must("git clone --quiet --no-local --mirror " .. shell.quote(source.git) .. " " .. shell.quote(dir),
+            "git clone " .. source.git)
+    end
+    has_commit = "git -C " .. shell.quote(dir) .. " cat-file -e " .. commit .. "^{commit}"
+    if shell.ok(has_commit) == false then
+        shell.must("git -C " .. shell.quote(dir) .. " fetch --quiet --prune origin", "git fetch " .. source.git)
+        if shell.ok(has_commit) == false then
+            error("commit " .. commit .. " is not in " .. source.git .. " any more; run tkn update", 0)
+        end
+    end
+    return dir
+end
+
+function expand_build_refs(text, ids)
+    return (string.gsub(text, "%${build%.([%w_]+)}", function(name)
+        return store.root() .. "/steps/" .. ids[name] .. "/tree"
+    end))
+end
+
+-- Runs one build step in a fresh checkout at the pinned commit. The
+-- tree is built where it will stay (steps/<id>/tree), since builds may
+-- record their own path; steps/<id>/done, written last, is what makes it
+-- count as finished.
+function build_step(env, entry, pins, ids)
+    step = entry.step
+    if entry.cached == true then
+        print("  = " .. step.name .. " (cached)")
+        return
+    end
+    print("  + " .. step.name)
+    pin = pins.sources[step.from]
+    source_dir = mirror(step.from, env.sources[step.from], pin.commit)
+    shell.remove(entry.dir)
+    shell.mkdir(entry.dir)
+    tree = entry.dir .. "/tree"
+    shell.must("git clone --quiet --no-hardlinks --no-checkout " .. shell.quote(source_dir) .. " " .. shell.quote(tree)
+        .. " && git -C " .. shell.quote(tree) .. " checkout --quiet --detach " .. pin.commit,
+        "checkout of " .. step.from)
+    prefix = ""
+    if step.env != nil then
+        for _, name in ipairs(data.sorted_keys(step.env)) do
+            prefix = prefix .. name .. "=" .. shell.quote(expand_build_refs(step.env[name], ids)) .. " "
+        end
+    end
+    cmd = "cd " .. shell.quote(tree) .. " && " .. prefix .. "sh -c " .. shell.quote(expand_build_refs(step.cmd, ids))
+    if shell.run(cmd) != true then
+        shell.remove(entry.dir)
+        error("build step '" .. step.name .. "' failed (" .. step.where .. ")", 0)
+    end
+    data.write_file(entry.dir .. "/done", "")
+    entry.cached = true
+end
+
+function chmod(path, mode)
+    if mode != nil then
+        shell.must("chmod " .. shell.quote(mode) .. " " .. shell.quote(path), "chmod " .. path)
+    end
+end
+
+-- Copies `from` to `gen`/`to`, refusing to overwrite: two declarations
+-- writing the same generation path is a spec error.
+function place(gen, from, to, where)
+    dest = gen .. "/" .. to
+    if lfs.symlinkattributes(dest) != nil then
+        error(where .. ": " .. to .. " is already in the generation", 0)
+    end
+    shell.mkdir(shell.parent(dest))
+    shell.must("cp -a " .. shell.quote(from) .. " " .. shell.quote(dest), "copy to " .. to)
+    return dest
+end
+
+function env_script(env)
+    lines = {
+        "# Generated by teken for env " .. env.name .. ". Source it from your shell's rc file.",
+        "export PATH=" .. shell.quote(store.current_path(env.name) .. "/bin") .. ":\"$PATH\"",
+    }
+    for _, name in ipairs(data.sorted_keys(env.env)) do
+        table.insert(lines, "export " .. name .. "=" .. shell.quote(env.env[name]))
+    end
+    return table.concat(lines, "\n") .. "\n"
+end
+
+-- Runs the env's verify commands against generation directory `gen`,
+-- its bin/ first on PATH and its env vars set. Returns the first
+-- failing command, or nil.
+function run_verify(env, gen)
+    prefix = ""
+    for _, name in ipairs(data.sorted_keys(env.env)) do
+        prefix = prefix .. name .. "=" .. shell.quote(env.env[name]) .. " "
+    end
+    prefix = prefix .. "TEKEN_GEN=" .. shell.quote(gen) .. " PATH=" .. shell.quote(gen .. "/bin") .. ":\"$PATH\" "
+    for _, cmd in ipairs(env.verify) do
+        print("  ? " .. cmd)
+        if shell.run(prefix .. "sh -c " .. shell.quote(cmd)) != true then
+            return cmd
+        end
+    end
+    return nil
+end
+
+function assemble(env, pins, gen, steps, ids)
+    for _, entry in ipairs(steps) do
+        build_step(env, entry, pins, ids)
+    end
+    for _, entry in ipairs(steps) do
+        for _, from in ipairs(data.sorted_keys(entry.step.install)) do
+            src = entry.dir .. "/tree/" .. from
+            if lfs.symlinkattributes(src) == nil then
+                error(entry.step.where .. ": build step '" .. entry.step.name .. "' did not produce " .. from, 0)
+            end
+            place(gen, src, entry.step.install[from], entry.step.where)
+        end
+    end
+    for _, item in ipairs(env.fetch) do
+        digest = pins.fetch[item.url]
+        cached = store.cache_dir("fetch") .. "/" .. digest
+        if lfs.attributes(cached) == nil then
+            if lock.download(item.url) != digest then
+                error(item.where .. ": " .. item.url .. " changed since it was pinned; run tkn update", 0)
+            end
+        end
+        chmod(place(gen, cached, item.path, item.where), item.mode)
+    end
+    for _, item in ipairs(env.files) do
+        dest = nil
+        if item.source != nil then
+            dest = place(gen, env.spec_dir .. "/" .. item.source, item.path, item.where)
+        else
+            dest = gen .. "/" .. item.path
+            if lfs.symlinkattributes(dest) != nil then
+                error(item.where .. ": " .. item.path .. " is already in the generation", 0)
+            end
+            shell.mkdir(shell.parent(dest))
+            data.write_file(dest, item.content)
+        end
+        chmod(dest, item.mode)
+    end
+    for _, item in ipairs(env.links) do
+        if lfs.symlinkattributes(gen .. "/" .. item.target) == nil then
+            error(item.where .. ": link target " .. item.target .. " is not in the generation", 0)
+        end
+    end
+    data.write_file(gen .. "/env.sh", env_script(env))
+end
+
+-- Builds generation `id` and runs verify in it. A generation already
+-- built is reused. The build happens in gens/<id>.tmp, renamed only
+-- when every step and every verify command succeeded; a build failure
+-- removes it, a verify failure keeps it for inspection.
+function home.build(env, pins, id)
+    final = store.gen_path(env.name, id)
+    if store.has_gen(env.name, id) then
+        print("generation " .. id .. " is already built")
+        return final
+    end
+    tmp = final .. ".tmp"
+    shell.remove(tmp)
+    shell.mkdir(tmp .. "/bin")
+    steps, ids = home.steps(env, pins)
+    print("building " .. env.name .. " generation " .. id)
+    ok, err = pcall(assemble, env, pins, tmp, steps, ids)
+    if ok != true then
+        shell.remove(tmp)
+        error(err, 0)
+    end
+    step_ids = {}
+    for _, entry in ipairs(steps) do
+        table.insert(step_ids, entry.id)
+    end
+    links = {}
+    for _, item in ipairs(env.links) do
+        table.insert(links, {path = item.path, target = item.target})
+    end
+    data.save(tmp .. "/meta.lua", {
+        id = id, env = env.name, target = "home", teken = version.number,
+        created = os.date("!%Y-%m-%dT%H:%M:%SZ"), steps = step_ids, links = links,
+    })
+    print("verifying")
+    failed = run_verify(env, tmp)
+    if failed != nil then
+        error("verify failed: " .. failed .. "\nthe candidate is kept at " .. tmp, 0)
+    end
+    ok, err = os.rename(tmp, final)
+    if ok == nil then
+        error("cannot finish " .. final .. ": " .. tostring(err), 0)
+    end
+    return final
+end
+
+-- Links --------------------------------------------------------------
+
+function link_target(name, target)
+    return store.current_path(name) .. "/" .. target
+end
+
+function is_ours(name, path)
+    target = lfs.symlinkattributes(path, "target")
+    prefix = store.current_path(name) .. "/"
+    return target != nil and string.sub(target, 1, string.len(prefix)) == prefix
+end
+
+function adopted_path(name, path)
+    return store.env_dir(name) .. "/adopted/" .. string.gsub(path, "/", "%%")
+end
+
+function move(from, to)
+    shell.mkdir(shell.parent(to))
+    shell.must("mv -T " .. shell.quote(from) .. " " .. shell.quote(to), "move " .. from)
+end
+
+-- Makes `link.path` point through current to `link.target`. Whatever
+-- else stands there is moved to adopted/, never deleted.
+function place_link(name, link)
+    want = link_target(name, link.target)
+    if lfs.symlinkattributes(link.path, "target") == want then
+        return
+    end
+    if lfs.symlinkattributes(link.path) != nil then
+        if is_ours(name, link.path) then
+            os.remove(link.path)
+        else
+            keep = adopted_path(name, link.path)
+            if lfs.symlinkattributes(keep) != nil then
+                error("cannot adopt " .. link.path .. ": " .. keep .. " already holds an adopted file", 0)
+            end
+            print("  adopting " .. link.path .. " -> " .. keep)
+            move(link.path, keep)
+        end
+    end
+    shell.mkdir(shell.parent(link.path))
+    ok, err = lfs.link(want, link.path, true)
+    if ok == nil then
+        error("cannot link " .. link.path .. ": " .. tostring(err), 0)
+    end
+end
+
+-- Removes our link at `path` and puts back what it adopted, if anything.
+function drop_link(name, path)
+    if is_ours(name, path) then
+        os.remove(path)
+    end
+    keep = adopted_path(name, path)
+    if lfs.symlinkattributes(keep) != nil and lfs.symlinkattributes(path) == nil then
+        print("  restoring " .. path)
+        move(keep, path)
+    end
+end
+
+function links_of(name, id)
+    if id == nil then
+        return {}
+    end
+    meta = store.meta(name, id)
+    if meta == nil or meta.links == nil then
+        return {}
+    end
+    return meta.links
+end
+
+-- Moves the link set from generation `from`'s to `to`'s: every link of
+-- `to` placed, every link only `from` had dropped. Running it again, or
+-- with from and to swapped, converges, which is what makes rollback
+-- after a crash safe.
+function switch_links(name, from, to)
+    wanted = {}
+    for _, link in ipairs(links_of(name, to)) do
+        wanted[link.path] = true
+        place_link(name, link)
+    end
+    for _, link in ipairs(links_of(name, from)) do
+        if wanted[link.path] != true then
+            drop_link(name, link.path)
+        end
+    end
+end
+
+-- Activation ---------------------------------------------------------
+
+function home.activate(env, from, to)
+    store.set_current(env.name, to)
+    switch_links(env.name, from, to)
+    print("health check")
+    failed = run_verify(env, store.current_path(env.name))
+    if failed != nil then
+        error("health check failed: " .. failed, 0)
+    end
+end
+
+-- Undoes an activation recorded as {from, to}, from any point it
+-- reached: current points back at `from` and the link set is `from`'s.
+function home.rollback(name, intent)
+    if intent.from == nil then
+        switch_links(name, intent.to, nil)
+        store.set_current(name, nil)
+        return
+    end
+    store.set_current(name, intent.from)
+    switch_links(name, intent.to, intent.from)
+end
+
+-- What a switch from `from` to the env's declared links would change.
+function home.link_changes(env, from)
+    old = {}
+    for _, link in ipairs(links_of(env.name, from)) do
+        old[link.path] = link.target
+    end
+    changes = {}
+    seen = {}
+    for _, link in ipairs(env.links) do
+        seen[link.path] = true
+        if old[link.path] == nil then
+            table.insert(changes, "+ " .. link.path)
+        elseif old[link.path] != link.target then
+            table.insert(changes, "~ " .. link.path)
+        end
+    end
+    for _, link in ipairs(links_of(env.name, from)) do
+        if seen[link.path] != true then
+            table.insert(changes, "- " .. link.path)
+        end
+    end
+    return changes
+end
+
+return home

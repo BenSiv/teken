@@ -102,7 +102,7 @@ return {
          cmd = "bash bld/build_lang.sh && bash bld/build_libs.sh",
          install = {["bin/luam"] = "bin/luam"}},
         {name = "brex", from = "brex", needs = {"luam"},
-         env = {LUAM_DIR = "${source.luam}"},
+         env = {LUAM_DIR = "${build.luam}"},
          cmd = "bash bld/build.sh",
          install = {["bin/brex"] = "bin/brex"}},
     },
@@ -113,16 +113,22 @@ return {
 | Field | What it declares | Targets |
 |---|---|---|
 | `apt` | Packages installed in the image | container |
-| `fetch` | Files by URL with `sha256` (installers, .deb, certificates) | both |
+| `fetch` | Files by URL (`url`, `path`, `mode`), their sha256 pinned by the lock | both |
 | `sources` | Git repos, pinned to a commit by the lock, used by builds | both |
 | `build` | Commands run in a source; `install` copies outputs into the generation | both |
-| `files` | Files placed in the generation, from the spec or inline | both |
-| `links` | Paths outside the generation that point into it | home |
+| `files` | Files placed in the generation (`path`, then `source` in the spec or inline `content`; `mode`) | both |
+| `links` | Paths outside the generation (`path`) that point into it (`target`, relative to the generation) | home |
 | `env` | Environment variables for the env's shell | both |
 | `verify` | Commands that must exit 0 in the built generation | both |
 
 A unit that uses a field its env's target can't handle is a load error
 that names the unit and field.
+
+A build step runs in a fresh checkout of its source at the pinned
+commit. `needs` lists earlier steps it uses, and `${build.<step>}` is
+the finished tree of one of them (a step may only refer to steps in its
+`needs`). Finished trees stay in the store for as long as a kept
+generation uses them, so a binary may keep paths into its tree.
 
 There is no `absent` and there are no `creates`/`unless` guards. Anything
 not declared is simply not in the next generation, and build steps never
@@ -228,21 +234,23 @@ command. It is generated from the spec, idempotent, and never builds.
 
 ## Target: home
 
-**Generation:** a directory, `~/.local/state/teken/<env>/gens/<id>/`,
+The store root is `~/.local/state/teken`, or `$TEKEN_STATE` when set.
+
+**Generation:** a directory, `~/.local/state/teken/envs/<env>/gens/<id>/`,
 holding `bin/`, `files/`, `env.sh` and `meta.lua`.
 
 **Build:** in `gens/<id>.tmp/`, renamed to `gens/<id>/` only when every
 step and `verify` succeeded, so a partial build never looks complete.
 Build steps run on the host in a scratch checkout of each source at its
-locked commit (not hermetic: they see the host's compilers and
-libraries). Step outputs are cached in `~/.local/state/teken/steps/<hash>/`
+locked commit (not hermetic: they see the host's compilers, libraries
+and `$HOME`). Step outputs are cached in `~/.local/state/teken/steps/<hash>/`
 and reused across generations and envs.
 
-**Activate:** `~/.local/state/teken/<env>/current` is a symlink to the
+**Activate:** `~/.local/state/teken/envs/<env>/current` is a symlink to the
 active generation. Activation creates `current.new` pointing at the new
 one and `rename(2)`s it over `current`, which is atomic. Every declared
 link points through `current`
-(`~/.bashrc -> ~/.local/state/teken/home/current/files/bashrc`), and one
+(`~/.bashrc -> ~/.local/state/teken/envs/home/current/files/bashrc`), and one
 PATH entry covers all binaries (`.../current/bin`), so the whole content
 of the environment changes in that one rename.
 
@@ -255,7 +263,7 @@ harmless and journals them in the intent record:
 - links added by the new generation are created **after** the rename;
 - links dropped by it are removed **after** the rename;
 - a real file where a new link goes is moved to
-  `~/.local/state/teken/<env>/adopted/` (never deleted), and rollback
+  `~/.local/state/teken/envs/<env>/adopted/` (never deleted), and rollback
   puts it back.
 
 A crash between the rename and the link updates is completed or undone by
