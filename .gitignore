@@ -3,4 +3,4 @@ obj/
 tst/integration/.tmp-*/
 src/build_commit.lua
 
-examples/*/lock.lua
+tst/smoke/lock.lua

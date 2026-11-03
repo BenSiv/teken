@@ -1,7 +1,8 @@
 # Smoke test
 
-Two small envs for trying teken on a real machine, built from the same
-units:
+A manual test of teken on a real machine, with real podman: the
+automated suite (`bld/test.sh`) uses a fake podman and does not run
+this. Two small envs, built from the same units:
 
 | Env | Target | What it makes |
 |---|---|---|
@@ -28,7 +29,7 @@ gcc -O2 -shared -fPIC -Isrc/ -o lib/lfs/lfs.so lib/lfs/src/lfs.c   # or bash bld
 cd .. && git clone https://github.com/BenSiv/teken && cd teken
 ./bld/build.sh                     # -> bin/tkn
 alias tkn="$PWD/bin/tkn"
-cd examples/smoke
+cd tst/smoke
 ```
 
 ## Home target
