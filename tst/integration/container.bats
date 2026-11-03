@@ -232,3 +232,32 @@ LUA
     [ "$(ls "$PODMAN_STATE/images" | wc -l)" -eq 2 ]
     grep -q "podman rmi" "$LOG"
 }
+
+@test "rollback runs the old image with its own settings, not the spec's" {
+    "$TKN" lock envs/test.lua
+    "$TKN" switch envs/test.lua -y
+    first=$(active)
+    tools_unit '"true"' nano
+    "$TKN" switch envs/test.lua -y
+    # The spec moves on: new ports, a verify generation one would fail.
+    sed -i 's/8000:8000/9000:9000/' envs/test.lua
+    tools_unit '"false"' nano
+    run "$TKN" rollback envs/test.lua -y
+    [ "$status" -eq 0 ]
+    [ "$(image_of box)" = "$first" ]
+    box box | grep -qF -- "--publish 8000:8000"
+}
+
+@test "a generation with a different container name swaps by name" {
+    "$TKN" lock envs/test.lua
+    "$TKN" switch envs/test.lua -y
+    first=$(active)
+    sed -i 's/name = "box"/name = "crate"/' envs/test.lua
+    run "$TKN" switch envs/test.lua -y
+    [ "$status" -eq 0 ]
+    [ "$(containers)" = "crate " ]
+    run "$TKN" rollback envs/test.lua -y
+    [ "$status" -eq 0 ]
+    [ "$(containers)" = "box " ]
+    [ "$(image_of box)" = "$first" ]
+}

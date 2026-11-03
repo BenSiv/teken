@@ -109,16 +109,15 @@ function env_script(env)
     return table.concat(lines, "\n") .. "\n"
 end
 
--- Runs the env's verify commands against generation directory `gen`,
--- its bin/ first on PATH and its env vars set. Returns the first
--- failing command, or nil.
-function run_verify(env, gen)
+-- Runs `verify` against generation directory `gen`, its bin/ first on
+-- PATH and `vars` set. Returns the first failing command, or nil.
+function run_verify(verify, vars, gen)
     prefix = ""
-    for _, name in ipairs(data.sorted_keys(env.env)) do
-        prefix = prefix .. name .. "=" .. shell.quote(env.env[name]) .. " "
+    for _, name in ipairs(data.sorted_keys(vars)) do
+        prefix = prefix .. name .. "=" .. shell.quote(vars[name]) .. " "
     end
     prefix = prefix .. "TEKEN_GEN=" .. shell.quote(gen) .. " PATH=" .. shell.quote(gen .. "/bin") .. ":\"$PATH\" "
-    for _, cmd in ipairs(env.verify) do
+    for _, cmd in ipairs(verify) do
         print("  ? " .. cmd)
         if shell.run(prefix .. "sh -c " .. shell.quote(cmd)) != true then
             return cmd
@@ -203,9 +202,10 @@ function home.build(env, pins, id)
     data.save(tmp .. "/meta.lua", {
         id = id, env = env.name, target = "home", teken = version.number,
         created = os.date("!%Y-%m-%dT%H:%M:%SZ"), steps = step_ids, links = links,
+        verify = env.verify, vars = env.env,
     })
     print("verifying")
-    failed = run_verify(env, tmp)
+    failed = run_verify(env.verify, env.env, tmp)
     if failed != nil then
         error("verify failed: " .. failed .. "\nthe candidate is kept at " .. tmp, 0)
     end
@@ -305,11 +305,21 @@ end
 
 -- Activation ---------------------------------------------------------
 
+-- The health check uses the verify commands and vars recorded in the
+-- generation, not the spec's: a rollback checks the old generation
+-- against what it was built to pass.
 function home.activate(env, from, to)
     store.set_current(env.name, to)
     switch_links(env.name, from, to)
     print("health check")
-    failed = run_verify(env, store.current_path(env.name))
+    meta = store.meta(env.name, to)
+    verify = meta.verify
+    vars = meta.vars
+    if verify == nil then
+        verify = {}
+        vars = {}
+    end
+    failed = run_verify(verify, vars, store.current_path(env.name))
     if failed != nil then
         error("health check failed: " .. failed, 0)
     end

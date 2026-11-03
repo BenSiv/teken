@@ -103,3 +103,19 @@ LUA
     [ "$status" -eq 1 ]
     [[ "$output" == *"another tkn is changing env 'test'"* ]]
 }
+
+@test "rollback checks the old generation with its own verify, not the spec's" {
+    hello_unit one
+    env_file '"hello"'
+    "$TKN" lock envs/test.lua
+    "$TKN" switch envs/test.lua -y
+    first=$(active)
+    hello_unit two
+    "$TKN" switch envs/test.lua -y
+    # The spec moves on; what generation one was built to pass does not.
+    sed -i 's/verify = {"hello"}/verify = {"hello", "false"}/' units/hello.lua
+    run "$TKN" rollback envs/test.lua -y
+    [ "$status" -eq 0 ]
+    [ "$(active)" = "$first" ]
+    [ "$(cat "$HOME/.rc")" = "one" ]
+}
