@@ -1,0 +1,101 @@
+#!/bin/bash
+# A stand-in for podman in the integration tests. Images and containers
+# are files under $PODMAN_STATE, every call is logged to $LOG, and
+# verify commands run with the local sh. FAKE_IN tells a command where
+# it runs: "candidate" (podman run, a throwaway container of a new
+# image) or "live" (podman exec in the activated container).
+S="$PODMAN_STATE"
+mkdir -p "$S/images" "$S/containers"
+echo "podman $*" >> "$LOG"
+key() { printf '%s' "$1" | tr '/:' '__'; }
+container() { printf '%s' "$S/containers/$1"; }
+
+cmd="$1"
+shift
+case "$cmd" in
+    pull)
+        ;;
+    image)
+        sub="$1"
+        shift
+        case "$sub" in
+            inspect) echo "sha256:$(printf '%s' "${@: -1}" | sha256sum | cut -c1-64)" ;;
+            exists) [ -f "$S/images/$(key "$1")" ] ;;
+        esac
+        ;;
+    build)
+        while [ $# -gt 0 ]; do
+            case "$1" in
+                --tag) tag="$2"; shift 2 ;;
+                --file) file="$2"; shift 2 ;;
+                *) shift ;;
+            esac
+        done
+        if grep -q FAIL_BUILD "$file"; then
+            echo "build failed" >&2
+            exit 1
+        fi
+        cp "$file" "$S/images/$(key "$tag")"
+        ;;
+    rmi)
+        rm -f "$S/images/$(key "$1")"
+        ;;
+    run)
+        while [ "$1" != "-c" ]; do shift; done
+        FAKE_IN=candidate sh -c "$2"
+        ;;
+    create)
+        args="$*"
+        while [ $# -gt 0 ]; do
+            case "$1" in
+                --name) name="$2"; shift 2 ;;
+                --label|--hostname|--restart|--publish|--volume) shift 2 ;;
+                --tty) shift ;;
+                *) image="$1"; break ;;
+            esac
+        done
+        [ -f "$(container "$name")" ] && exit 1
+        printf 'image=%s\nrunning=false\nargs=%s\n' "$image" "$args" > "$(container "$name")"
+        ;;
+    container)
+        [ "$1" = exists ] && [ -f "$(container "$2")" ]
+        ;;
+    start)
+        [ -f "$(container "$1")" ] || exit 1
+        sed -i 's/^running=.*/running=true/' "$(container "$1")"
+        ;;
+    stop)
+        [ -f "$(container "$1")" ] || exit 1
+        sed -i 's/^running=.*/running=false/' "$(container "$1")"
+        ;;
+    rename)
+        [ -f "$(container "$1")" ] || exit 1
+        [ -f "$(container "$2")" ] && exit 1
+        mv "$(container "$1")" "$(container "$2")"
+        [ -f "$(container "$1").diff" ] && mv "$(container "$1").diff" "$(container "$2").diff"
+        true
+        ;;
+    rm)
+        [ "$1" = --force ] && shift
+        rm -f "$(container "$1")" "$(container "$1").diff"
+        ;;
+    inspect)
+        [ -f "$(container "$3")" ] || exit 1
+        case "$2" in
+            *Running*) sed -n 's/^running=//p' "$(container "$3")" ;;
+            *teken.id*) sed -n 's/^image=.*://p' "$(container "$3")" ;;
+        esac
+        ;;
+    exec)
+        while [ "$1" != "-c" ]; do shift; done
+        FAKE_IN=live sh -c "$2"
+        ;;
+    diff)
+        cat "$(container "$1").diff" 2>/dev/null
+        true
+        ;;
+    *)
+        echo "fake podman: unknown command $cmd" >&2
+        exit 1
+        ;;
+esac

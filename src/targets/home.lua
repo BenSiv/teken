@@ -12,6 +12,7 @@ shell = require("shell")
 hash = require("hash")
 store = require("store")
 lock = require("lock")
+sources = require("sources")
 version = require("version")
 
 home = {}
@@ -43,24 +44,6 @@ function home.steps(env, pins)
     return result, ids
 end
 
--- A bare mirror of `source` holding `commit`, fetched only when the
--- commit is not there yet.
-function mirror(name, source, commit)
-    dir = store.cache_dir("git") .. "/" .. name .. "-" .. hash.id(source.git)
-    if lfs.attributes(dir) == nil then
-        shell.must("git clone --quiet --no-local --mirror " .. shell.quote(source.git) .. " " .. shell.quote(dir),
-            "git clone " .. source.git)
-    end
-    has_commit = "git -C " .. shell.quote(dir) .. " cat-file -e " .. commit .. "^{commit}"
-    if shell.ok(has_commit) == false then
-        shell.must("git -C " .. shell.quote(dir) .. " fetch --quiet --prune origin", "git fetch " .. source.git)
-        if shell.ok(has_commit) == false then
-            error("commit " .. commit .. " is not in " .. source.git .. " any more; run tkn update", 0)
-        end
-    end
-    return dir
-end
-
 function expand_build_refs(text, ids)
     return (string.gsub(text, "%${build%.([%w_]+)}", function(name)
         return store.root() .. "/steps/" .. ids[name] .. "/tree"
@@ -78,14 +61,10 @@ function build_step(env, entry, pins, ids)
         return
     end
     print("  + " .. step.name)
-    pin = pins.sources[step.from]
-    source_dir = mirror(step.from, env.sources[step.from], pin.commit)
     shell.remove(entry.dir)
     shell.mkdir(entry.dir)
     tree = entry.dir .. "/tree"
-    shell.must("git clone --quiet --no-hardlinks --no-checkout " .. shell.quote(source_dir) .. " " .. shell.quote(tree)
-        .. " && git -C " .. shell.quote(tree) .. " checkout --quiet --detach " .. pin.commit,
-        "checkout of " .. step.from)
+    sources.checkout(step.from, env.sources[step.from], pins.sources[step.from].commit, tree)
     prefix = ""
     if step.env != nil then
         for _, name in ipairs(data.sorted_keys(step.env)) do
@@ -338,7 +317,8 @@ end
 
 -- Undoes an activation recorded as {from, to}, from any point it
 -- reached: current points back at `from` and the link set is `from`'s.
-function home.rollback(name, intent)
+function home.rollback(env, intent)
+    name = env.name
     if intent.from == nil then
         switch_links(name, intent.to, nil)
         store.set_current(name, nil)
@@ -346,6 +326,14 @@ function home.rollback(name, intent)
     end
     store.set_current(name, intent.from)
     switch_links(name, intent.to, intent.from)
+end
+
+function home.has_gen(name, id)
+    return store.has_gen(name, id)
+end
+
+function home.remove(name, id)
+    shell.remove(store.gen_path(name, id))
 end
 
 -- What a switch from `from` to the env's declared links would change.

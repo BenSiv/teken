@@ -148,8 +148,9 @@ function store.gens(name)
     return result
 end
 
--- Trims history to the last `keep` entries and removes the generations
--- that drop out of it. The active generation is always the last entry.
+-- Trims history to the last `keep` entries. Returns the generations
+-- that dropped out of it, for their target to remove. The active
+-- generation is always the last entry.
 function store.prune(name, keep)
     history = store.history(name)
     removed = {}
@@ -162,12 +163,13 @@ function store.prune(name, keep)
     for _, id in ipairs(history) do
         kept[id] = true
     end
+    dropped = {}
     for _, id in ipairs(removed) do
         if kept[id] != true then
-            shell.remove(store.gen_path(name, id))
+            table.insert(dropped, id)
         end
     end
-    return removed
+    return dropped
 end
 
 return store

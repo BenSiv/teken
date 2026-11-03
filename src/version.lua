@@ -3,8 +3,9 @@
 -- var), so env files can require it with `requires_teken`.
 --
 --   0.1.0  home target: sources, build, fetch, files, links, env, verify
+--   0.2.0  container target: container section, apt, volume/bind state
 
-version = {number = "0.1.0"}
+version = {number = "0.2.0"}
 
 -- The commit the binary was built from; bld/build.sh writes
 -- src/build_commit.lua (untracked). A run from source has none. The

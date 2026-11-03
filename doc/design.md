@@ -58,7 +58,7 @@ reads `envs/<hostname>.lua` from the current directory (like seder).
 ```lua
 -- envs/devenv.lua
 return {
-    requires_teken = "0.1.0",
+    requires_teken = "0.2.0",
     target = "container",
     vars = {rnd_path = "~/rnd"},
     units = {"base-tools", "cloud-clis", "luam-stack", "python", "dotfiles"},
@@ -75,17 +75,26 @@ return {
         base = "ubuntu:24.04",
         hostname = "celleste-bensiv",
         ports = {"8000:8000", "8080:8080"},
-        env = {TZ = "Asia/Jerusalem"},
-        entrypoint = {"/root/.teken/start"},
+        tty = true,
+        restart = "always",
+        command = {"bash"},
+        ephemeral = {"/root/.cache"},   -- may change without being state
     },
     keep = 3,   -- generations kept, active one included
 }
 ```
 
+`container` fields: `name` and `base` (required), `hostname`, `ports`,
+`tty`, `restart`, `command`, `home` (default `/root`), `ephemeral` (see
+[Activate](#target-container)) and `health_wait` (seconds before the
+health check, default 3).
+
 `vars` work as in seder: `${name}` from `vars` plus built-ins (`home`,
 `user`, `uid`, `env` for the env's name), and a leading `~/` becomes the
-home directory of the side that uses the path (host for `bind`, container
-otherwise).
+home directory of the side that uses the path: the host's in a `bind`,
+otherwise the env's (the user's for a home env, `container.home` for a
+container env). A `~` inside a var stays until the var is used, so one
+var can serve both sides.
 
 ## Unit files
 
@@ -197,40 +206,64 @@ prints what changed. `tkn plan` then shows the effect on each env.
 
 ## Target: container
 
-**Generation:** an OCI image tagged `teken/<env>:<id>`.
+**Generation:** an OCI image tagged `teken/<env>:<id>`. Inside it the
+generation lives at `/opt/teken` (`bin/` first on PATH, `files/`, ...),
+laid out as in the home target, so one unit serves a home env and a
+container env alike. `links` become symlinks in the image.
 
-**Build:** teken renders a Containerfile into the store
-(`gens/<id>/Containerfile`, kept for inspection) and runs `podman build`.
-Its layers follow unit order so podman's layer cache does the step
-caching: base image by digest; `apt` (one layer); `fetch`; each
-source + build; `files`; `env`; a generated `/root/.teken/start`
-entrypoint. Build secrets go through `podman build --secret`, so they
-never land in image history.
+**Build:** teken lays out a build context in `gens/<id>.tmp/`: a
+checkout of each build step's source at its pinned commit, the step's
+script, fetched files and spec files. Sources are cloned on the host
+with the host's git credentials, so private repos need no token inside
+the build. It then renders a Containerfile and runs `podman build`:
 
-**Verify:** `podman run --rm teken/<env>:<id> sh -c '<verify cmds>'`, with
-no state volumes mounted, so a candidate can never touch live data.
+1. `FROM <base>@<digest>`;
+2. `apt` packages, one layer;
+3. per build step: copy its checkout to `/opt/teken-build/<step>`, run
+   it there (`${build.<step>}` is that path), copy its `install` paths
+   into `/opt/teken`;
+4. fetched files, spec files, links;
+5. `ENV` for PATH and the env's vars; labels `teken.env` and `teken.id`.
+
+podman's layer cache decides which steps rerun. Step trees stay in the
+image so built binaries may keep paths into them. The Containerfile is
+kept in `gens/<id>/` for inspection.
+
+**Verify:** each `verify` command runs in a throwaway container of the
+new image (`podman run --rm`), with no state mounted, so a candidate can
+never touch live data. A failed verify keeps the image for inspection.
 
 **Activate:**
 
-1. Create `<name>-next` from the new image with the declared state
-   mounts (created, not started).
-2. Check the active container's writable layer (`podman diff`). Changes
-   outside declared state paths would be lost by the swap; teken lists
-   them and stops unless `--discard-undeclared` is given.
-3. Stop `<name>`; rename it to `<name>-prev` (removing the older `-prev`
-   only at commit).
-4. Rename `<name>-next` to `<name>` and start it.
-5. Health: `verify` through `podman exec`, plus "still running after N
-   seconds".
+1. If a container with the name exists that teken did not create
+   (there is no active generation), stop: teken never replaces a
+   container it doesn't own.
+2. Check the running container's own layer (`podman diff`). Changes
+   outside declared state, `container.ephemeral` and scratch paths
+   (`/tmp`, `/run`, `/var/tmp`, `/var/cache`, `/var/log`, ...) would be
+   lost by the swap; teken lists them and stops unless
+   `--discard-undeclared` is given.
+3. Create `<name>-next` from the new image with the declared state
+   mounts.
+4. Stop `<name>` and rename it to `<name>-<from id>`.
+5. Rename `<name>-next` to `<name>`, start it, point `current` at the new
+   generation.
+6. Health: after `health_wait` seconds the container must be running,
+   and every `verify` command must pass through `podman exec`.
 
-Rollback: stop and remove the new `<name>`, rename `<name>-prev` back,
-start it. The old image is never removed before commit, and `keep` decides
-how many old images stay for `tkn rollback`.
+**Rollback** undoes whatever of 3-5 happened: removes `<name>-next` and
+a `<name>` running the new generation, renames `<name>-<from id>` back
+and starts it, points `current` back. **Commit** removes
+`<name>-<from id>`. `tkn rollback` later creates a fresh container from
+the previous image; nothing is lost, since state lives on the declared
+volumes and bind mounts. Images of generations that drop out of `keep`
+are removed.
 
-**Runtime start:** `/root/.teken/start` does only what can't be baked into
-the image: ensure state paths exist, clone missing state repos, create
-links into bind mounts, run the declared `start` commands, then `exec` the
-command. It is generated from the spec, idempotent, and never builds.
+**Runtime start (not built yet):** a generated `/opt/teken/start`
+entrypoint for what can't be baked into the image: ensure state paths
+exist, clone missing state repos, create links into bind mounts, run
+declared `start` commands, then `exec` the command. Idempotent; never
+builds.
 
 ## Target: home
 
@@ -289,6 +322,9 @@ of rollback.
 
 ## Secrets
 
+Not built yet; env files with `secrets` are rejected until it is.
+Private git sources need no secret: they are cloned on the host.
+
 Declared per env with a source (`env:NAME`, `file:/path`,
 `cmd:camopass show github/work-token`) and a use (`build` or `run`).
 Build secrets go through `podman build --secret`, run secrets through
@@ -322,17 +358,29 @@ src/main.lua            -- CLI
 src/loader.lua          -- sandboxed loading, validation, var expansion
 src/lock.lua            -- read, check and update lock.lua
 src/hash.lua            -- generation and step ids
-src/store.lua           -- generations, intent records, keep/gc
-src/lifecycle.lua       -- the phases, rollback on failure
-src/shell.lua           -- every command goes through here (stubbed in tests)
-src/targets/container.lua
+src/data.lua            -- teken's own data files, written atomically
+src/store.lua           -- generations, history, intent records, run lock
+src/lifecycle.lua       -- the phases, rollback on failure, gc
+src/sources.lua         -- git mirrors and checkouts at pinned commits
+src/shell.lua           -- every command goes through here
 src/targets/home.lua
+src/targets/container.lua
 bld/build.sh            -- static build through luam, like seder
-tst/unit/, tst/integration/  -- integration tests drive tkn against stub podman/git
+tst/unit/, tst/integration/  -- integration tests use local git repos and a fake podman
 ```
 
-A target implements `validate(env)`, `build(env, gen)`, `verify(gen)`,
-`activate(from, to)`, `rollback(from, to)`, `active()` and `remove(gen)`.
+A target implements:
+
+| Function | Does |
+|---|---|
+| `build(env, pins, id)` | Builds and verifies generation `id`; reuses one already built |
+| `has_gen(name, id)` | Whether generation `id` is built and usable |
+| `activate(env, from, to, options)` | Switches to `to`, health check included; errors on failure |
+| `rollback(env, intent)` | Undoes an activation `{from, to}` from any point it reached |
+| `commit(env, from, to)` | Optional: drops what was kept for rollback |
+| `remove(name, id)` | Removes a generation that dropped out of history |
+| `steps(env, pins)`, `link_changes(env, from)` | What `tkn plan` shows |
+
 Adding a target (a bootc host, a remote machine) means adding one module.
 
 ## Not in scope

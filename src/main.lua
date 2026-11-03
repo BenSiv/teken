@@ -21,6 +21,8 @@ USAGE = """usage: tkn <command> [env.lua] [options]
   plan     [env]          what switch would build and change; nothing runs
   build    [env]          build and verify the spec's generation, no activation
   switch   [env] [-y]     build, verify, activate, health check; roll back on failure
+           --discard-undeclared   (container) replace it even when its own
+                                  layer has changes outside declared state
   rollback [env] [-y]     activate the previous generation
   gens     [env]          list generations; * marks the active one
   status   [env]          exit 2 when the active generation is not the spec's
@@ -38,12 +40,14 @@ ENV_COMMANDS = {
 }
 
 function parse_args(args)
-    options = {yes = false, names = {}}
+    options = {yes = false, names = {}, discard_undeclared = false}
     for _, value in ipairs(args) do
         if value == "-y" or value == "--yes" then
             options.yes = true
         elseif value == "-h" or value == "--help" then
             options.help = true
+        elseif value == "--discard-undeclared" then
+            options.discard_undeclared = true
         elseif value == "--version" then
             options.version = true
         elseif string.sub(value, 1, 1) == "-" then
@@ -131,7 +135,7 @@ function run_env_command(command, env, options)
             print("Not rolled back.")
             return 1
         end
-        return lifecycle.rollback(env)
+        return lifecycle.rollback(env, options)
     end
     plan = lifecycle.plan(env)
     lifecycle.print_plan(plan)
@@ -159,7 +163,7 @@ function run_env_command(command, env, options)
         return 1
     end
     id = lifecycle.build(env)
-    return lifecycle.switch(env, id)
+    return lifecycle.switch(env, id, options)
 end
 
 function main(args)

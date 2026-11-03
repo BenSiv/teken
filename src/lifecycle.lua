@@ -20,6 +20,7 @@ lifecycle = {}
 
 lifecycle.targets = {
     home = require("targets.home"),
+    container = require("targets.container"),
 }
 
 -- Exit codes (see doc/design.md, CLI).
@@ -64,10 +65,15 @@ function lifecycle.generation_id(env, pins)
             item.source = nil
         end
     end
+    image = nil
+    if env.container != nil then
+        image = env.container.base .. "@" .. pins.images[env.container.base]
+    end
     return hash.id({
         teken = version.number, target = env.target, env = env.name,
         sources = sources, build = without_where(env.build), fetch = fetch,
         files = files, links = without_where(env.links), vars = env.env, verify = env.verify,
+        apt = env.apt, container = env.container, state = env.state, image = image,
     })
 end
 
@@ -82,7 +88,7 @@ function lifecycle.recover(env)
         from = "nothing"
     end
     print("an interrupted switch of " .. env.name .. " to " .. intent.to .. " was found; rolling back to " .. from)
-    target_of(env).rollback(env.name, intent)
+    target_of(env).rollback(env, intent)
     store.set_intent(env.name, nil)
 end
 
@@ -96,7 +102,7 @@ function lifecycle.plan(env)
         return result
     end
     result.id = lifecycle.generation_id(env, pins)
-    result.built = store.has_gen(env.name, result.id)
+    result.built = target_of(env).has_gen(env.name, result.id)
     result.steps = target_of(env).steps(env, pins)
     result.links = target_of(env).link_changes(env, result.active)
     return result
@@ -148,11 +154,11 @@ end
 -- Activates generation `to`, rolling back on any failure. Returns 0,
 -- FAILED (rolled back cleanly) or STUCK (rollback failed too; the
 -- intent record stays so the next run tries again).
-function activate(env, from, to)
+function activate(env, from, to, options)
     target = target_of(env)
     store.set_intent(env.name, {from = from, to = to})
     print("switching " .. env.name .. " to " .. to)
-    ok, err = pcall(target.activate, env, from, to)
+    ok, err = pcall(target.activate, env, from, to, options)
     if ok == true then
         return 0
     end
@@ -162,7 +168,7 @@ function activate(env, from, to)
         back = "nothing"
     end
     print("rolling back to " .. back)
-    rolled, rollback_err = pcall(target.rollback, env.name, {from = from, to = to})
+    rolled, rollback_err = pcall(target.rollback, env, {from = from, to = to})
     if rolled != true then
         io.write(io.stderr, "tkn: rollback failed: " .. tostring(rollback_err) .. "\n"
             .. "the intent record in " .. store.env_dir(env.name) .. " is kept; the next tkn run retries the rollback\n")
@@ -172,44 +178,56 @@ function activate(env, from, to)
     return lifecycle.FAILED
 end
 
+-- After a successful activation: the target drops what it kept for
+-- rollback, history records the new generation, the intent record
+-- goes, and generations beyond `keep` are removed.
+function commit(env, from, to, history)
+    target = target_of(env)
+    if target.commit != nil then
+        target.commit(env, from, to)
+    end
+    store.set_history(env.name, history)
+    store.set_intent(env.name, nil)
+    for _, id in ipairs(store.prune(env.name, env.keep)) do
+        target.remove(env.name, id)
+    end
+end
+
 -- The full lifecycle. `id` is what lifecycle.build returned.
-function lifecycle.switch(env, id)
+function lifecycle.switch(env, id, options)
     from = store.active(env.name)
     if from == id then
         print(env.name .. " is already at " .. id)
         return 0
     end
-    code = activate(env, from, id)
+    code = activate(env, from, id, options)
     if code != 0 then
         return code
     end
     history = store.history(env.name)
     table.insert(history, id)
-    store.set_history(env.name, history)
-    store.set_intent(env.name, nil)
-    store.prune(env.name, env.keep)
+    commit(env, from, id, history)
     print("done: " .. env.name .. " is at " .. id)
     return 0
 end
 
 -- Activates the generation before the active one in history.
-function lifecycle.rollback(env)
+function lifecycle.rollback(env, options)
     history = store.history(env.name)
     active = store.active(env.name)
     if #history < 2 or history[#history] != active then
         error("no previous generation of " .. env.name .. " to roll back to", 0)
     end
     previous = history[#history - 1]
-    if store.has_gen(env.name, previous) == false then
+    if target_of(env).has_gen(env.name, previous) == false then
         error("generation " .. previous .. " is no longer in the store", 0)
     end
-    code = activate(env, active, previous)
+    code = activate(env, active, previous, options)
     if code != 0 then
         return code
     end
     table.remove(history)
-    store.set_history(env.name, history)
-    store.set_intent(env.name, nil)
+    commit(env, active, previous, history)
     print("done: " .. env.name .. " is back at " .. previous)
     return 0
 end
@@ -244,11 +262,17 @@ function lifecycle.gc()
             kept[id] = true
         end
         for _, id in ipairs(list_dir(store.gens_dir(name))) do
-            if kept[string.gsub(id, "%.tmp$", "")] != true or string.match(id, "%.tmp$") != nil then
+            meta = nil
+            if string.match(id, "%.tmp$") == nil then
+                meta = store.meta(name, id)
+            end
+            if meta == nil then
                 shell.remove(store.gen_path(name, id))
                 gens = gens + 1
+            elseif kept[id] != true then
+                lifecycle.targets[meta.target].remove(name, id)
+                gens = gens + 1
             else
-                meta = store.meta(name, id)
                 for _, step in ipairs(meta.steps) do
                     used_steps[step] = true
                 end

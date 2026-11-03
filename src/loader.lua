@@ -12,23 +12,33 @@ loader = {}
 
 ENV_KEYS = {
     requires_teken = "string", target = "string", vars = "table",
-    units = "table", state = "table", keep = "number",
+    units = "table", state = "table", keep = "number", container = "table",
 }
 
--- Unit fields and the targets that can use them.
+BOTH = {home = true, container = true}
+
+-- Unit fields and the targets that can use them. Everything but apt
+-- works for both, so a unit (luam-stack, dotfiles) serves a home env and
+-- a container env alike.
 UNIT_FIELDS = {
-    sources = {home = true},
-    build = {home = true},
-    fetch = {home = true},
-    files = {home = true},
-    links = {home = true},
-    env = {home = true},
-    verify = {home = true},
+    apt = {container = true},
+    sources = BOTH,
+    build = BOTH,
+    fetch = BOTH,
+    files = BOTH,
+    links = BOTH,
+    env = BOTH,
+    verify = BOTH,
 }
 
--- Targets this teken implements. The container target is designed
--- (doc/design.md) but not built yet.
-TARGETS = {home = true}
+TARGETS = {home = true, container = true}
+
+-- The container section of a container env.
+CONTAINER_FIELDS = {
+    name = "string", base = "string", hostname = "string", ports = "table",
+    tty = "boolean", restart = "string", command = "table", home = "string",
+    ephemeral = "table", health_wait = "number",
+}
 
 ITEM_FIELDS = {
     sources = {git = "string", ref = "string"},
@@ -78,9 +88,14 @@ function load_table(path)
     return value
 end
 
--- ${name} -> vars[name]; a leading ~/ -> $HOME/. ${build.<step>} is
--- left for the build, which alone knows where a step's tree is.
-function expand_string(value, vars, where)
+-- ${name} -> vars[name]; then a leading ~/ -> `tilde`/ (the env's home:
+-- the user's for a home env, the container's for a container env), or
+-- no ~ expansion when `tilde` is false. ${build.<step>} is left for the
+-- build, which alone knows where a step's tree is.
+function expand_string(value, vars, where, tilde)
+    if tilde == nil then
+        tilde = vars.home
+    end
     missing = nil
     value = string.gsub(value, "%${([%w_%.]+)}", function(name)
         if string.sub(name, 1, 6) == "build." then
@@ -95,23 +110,26 @@ function expand_string(value, vars, where)
     if missing != nil then
         fail(where, "unknown variable ${" .. missing .. "}")
     end
+    if tilde == false then
+        return value
+    end
     if value == "~" then
-        return shell.home()
+        return tilde
     end
     if string.sub(value, 1, 2) == "~/" then
-        return shell.home() .. string.sub(value, 2)
+        return tilde .. string.sub(value, 2)
     end
     return value
 end
 
-function expand_value(value, vars, where)
+function expand_value(value, vars, where, tilde)
     if type(value) == "string" then
-        return expand_string(value, vars, where)
+        return expand_string(value, vars, where, tilde)
     end
     if type(value) == "table" then
         result = {}
         for key, inner in pairs(value) do
-            result[key] = expand_value(inner, vars, where)
+            result[key] = expand_value(inner, vars, where, tilde)
         end
         return result
     end
@@ -177,7 +195,7 @@ end
 function new_env(name, path, spec_dir, target)
     return {
         name = name, path = path, spec_dir = spec_dir, target = target,
-        sources = {}, build = {}, fetch = {}, files = {}, links = {},
+        apt = {}, sources = {}, build = {}, fetch = {}, files = {}, links = {},
         env = {}, verify = {}, state = {}, origin = {},
     }
 end
@@ -228,6 +246,15 @@ function merge_unit(env, unit, unit_path, vars)
                 env.origin[id] = where
                 item.where = where
                 table.insert(env[field], item)
+            end
+        end
+    end
+    if unit.apt != nil then
+        check_string_list(unit.apt, unit_path .. ": apt")
+        for _, package in ipairs(unit.apt) do
+            if env.origin["apt." .. package] == nil then
+                env.origin["apt." .. package] = unit_path
+                table.insert(env.apt, package)
             end
         end
     end
@@ -310,22 +337,64 @@ function check_env(env)
     end
 end
 
+-- State paths. A container env keeps each on a named `volume` or a
+-- `bind` mount of a host path; a ~ in `bind` is the host's home, not
+-- the container's.
 function load_state(raw, env, vars)
     if data.is_list(raw) == false then
         fail(env.path, "'state' must be a list")
     end
+    fields = {path = "string"}
+    if env.target == "container" then
+        fields = {path = "string", volume = "string", bind = "string"}
+    end
     for index, item in ipairs(raw) do
         where = env.path .. ": state[" .. index .. "]"
-        check_fields(item, {path = "string"}, {"path"}, where)
+        check_fields(item, fields, {"path"}, where)
+        bind = item.bind
         item = expand_value(item, vars, where)
         check_absolute(item.path, where)
+        if env.target == "container" then
+            if (item.volume == nil) == (item.bind == nil) then
+                fail(where, "needs exactly one of 'volume' and 'bind'")
+            end
+            if bind != nil then
+                item.bind = expand_string(bind, vars, where, shell.home())
+                check_absolute(item.bind, where)
+            end
+        end
         table.insert(env.state, item)
     end
 end
 
-function builtin_vars(name)
+function load_container(raw, env_path)
+    if raw == nil then
+        fail(env_path, "a container env needs a 'container' section (name, base)")
+    end
+    check_fields(raw, CONTAINER_FIELDS, {"name", "base"}, env_path .. ": container")
+    for _, field in ipairs({"ports", "command", "ephemeral"}) do
+        if raw[field] != nil then
+            check_string_list(raw[field], env_path .. ": container." .. field)
+        end
+    end
+    if string.match(raw.name, "^[%w][%w_.-]*$") == nil then
+        fail(env_path, "container.name '" .. raw.name .. "' is not a valid container name")
+    end
+    if raw.home == nil then
+        raw.home = "/root"
+    end
+    if raw.health_wait == nil then
+        raw.health_wait = 3
+    end
+    return raw
+end
+
+-- Built-in vars. ${home} and ~ are where the env lives: the user's home
+-- for a home env, the container's (container.home, default /root) for a
+-- container env.
+function builtin_vars(name, home)
     uid = shell.trim(shell.must("id -u", "id -u"))
-    return {home = shell.home(), user = os.getenv("USER"), uid = uid, env = name}
+    return {home = home, user = os.getenv("USER"), uid = uid, env = name}
 end
 
 -- Loads envs/<name>.lua and the units it lists from units/ beside
@@ -351,7 +420,7 @@ function loader.load(env_path)
         end
     end
     if raw.target == nil then
-        fail(env_path, "'target' is required (home)")
+        fail(env_path, "'target' is required (" .. key_list(TARGETS) .. ")")
     end
     if TARGETS[raw.target] != true then
         fail(env_path, "unknown target '" .. raw.target .. "' (this teken builds: " .. key_list(TARGETS) .. ")")
@@ -369,16 +438,24 @@ function loader.load(env_path)
     if env.keep < 2 then
         fail(env_path, "'keep' must be at least 2, so there is a generation to roll back to")
     end
-    vars = builtin_vars(name)
+    home_dir = shell.home()
+    if raw.target == "container" then
+        env.container = load_container(raw.container, env_path)
+        home_dir = env.container.home
+    elseif raw.container != nil then
+        fail(env_path, "'container' is only for target 'container'")
+    end
+    vars = builtin_vars(name, home_dir)
     if raw.vars != nil then
         check_string_map(raw.vars, env_path .. ": vars")
         for key, value in pairs(raw.vars) do
             vars[key] = value
         end
     end
-    -- Vars may refer to each other and to ~ (projects = "~/Projects").
+    -- Vars may refer to each other. A ~ in a var stays until the var is
+    -- used, since it means a different home in a bind mount.
     for key, value in pairs(vars) do
-        vars[key] = expand_string(value, vars, env_path .. ": var " .. key)
+        vars[key] = expand_string(value, vars, env_path .. ": var " .. key, false)
     end
     if raw.state != nil then
         load_state(raw.state, env, vars)

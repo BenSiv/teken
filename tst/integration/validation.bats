@@ -20,14 +20,24 @@ LUA
     env_file '"bad"'
     run "$TKN" plan envs/test.lua
     [ "$status" -eq 1 ]
-    [[ "$output" == *"unknown field 'apt'"* ]]
+    [[ "$output" == *"'apt' is not available for target 'home'"* ]]
 }
 
-@test "the container target is designed but not built yet" {
+@test "a container env needs its container section" {
     printf 'return {target = "container", units = {"x"}}\n' > envs/test.lua
     run "$TKN" plan envs/test.lua
     [ "$status" -eq 1 ]
-    [[ "$output" == *"unknown target 'container' (this teken builds: home)"* ]]
+    [[ "$output" == *"a container env needs a 'container' section"* ]]
+}
+
+@test "container state needs a volume or a bind mount" {
+    unit a <<'LUA'
+return {verify = {"true"}}
+LUA
+    printf 'return {target = "container", units = {"a"}, container = {name = "c", base = "ubuntu:24.04"}, state = {{path = "/data"}}}\n' > envs/test.lua
+    run "$TKN" plan envs/test.lua
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"needs exactly one of 'volume' and 'bind'"* ]]
 }
 
 @test "two units claiming the same link fail with both places" {
