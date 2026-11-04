@@ -45,7 +45,7 @@ end
 
 -- The generation a container was created from, by its image's label.
 function generation_of(name)
-    out = podman("inspect --format '{{index .Config.Labels \"teken.id\"}}' " .. shell.quote(name), "podman inspect " .. name)
+    out = podman("container inspect --format '{{index .Config.Labels \"teken.id\"}}' " .. shell.quote(name), "podman inspect " .. name)
     return shell.trim(out)
 end
 
@@ -351,7 +351,9 @@ function container.undeclared(env, name)
         end
     end
     changed = {}
-    for _, line in ipairs(shell.lines(podman("diff " .. shell.quote(name), "podman diff " .. name))) do
+    -- `container diff`: a bare `podman diff` takes an image of the same
+    -- name (a container's old image often has one) over the container.
+    for _, line in ipairs(shell.lines(podman("container diff " .. shell.quote(name), "podman diff " .. name))) do
         path = string.match(line, "^[ACD]%s+(/.*)$")
         if path != nil then
             ok = true
@@ -456,7 +458,7 @@ function create_args(env_name, run, tag)
 end
 
 function is_running(name)
-    return shell.trim(podman("inspect --format '{{.State.Running}}' " .. shell.quote(name), "podman inspect " .. name)) == "true"
+    return shell.trim(podman("container inspect --format '{{.State.Running}}' " .. shell.quote(name), "podman inspect " .. name)) == "true"
 end
 
 -- Waits until the entrypoint (/opt/teken/start) reports done, for at

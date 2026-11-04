@@ -58,7 +58,25 @@ case "$cmd" in
         printf 'image=%s\nrunning=false\nargs=%s\n' "$image" "$args" > "$(container "$name")"
         ;;
     container)
-        [ "$1" = exists ] && [ -f "$(container "$2")" ]
+        # Only the container forms of exists, inspect and diff: teken must
+        # never let podman pick an image of the same name instead.
+        sub="$1"
+        shift
+        case "$sub" in
+            exists) [ -f "$(container "$1")" ] ;;
+            inspect)
+                [ -f "$(container "$3")" ] || exit 1
+                case "$2" in
+                    *Running*) sed -n 's/^running=//p' "$(container "$3")" ;;
+                    *teken.id*) sed -n 's/^image=.*://p' "$(container "$3")" ;;
+                esac
+                ;;
+            diff)
+                cat "$(container "$1").diff" 2>/dev/null
+                true
+                ;;
+            *) echo "fake podman: unknown container command $sub" >&2; exit 1 ;;
+        esac
         ;;
     start)
         # The entrypoint's outcome: FAKE_START=failed makes it fail.
@@ -82,12 +100,9 @@ case "$cmd" in
         [ "$1" = --force ] && shift
         rm -f "$(container "$1")" "$(container "$1").diff" "$(container "$1").status"
         ;;
-    inspect)
-        [ -f "$(container "$3")" ] || exit 1
-        case "$2" in
-            *Running*) sed -n 's/^running=//p' "$(container "$3")" ;;
-            *teken.id*) sed -n 's/^image=.*://p' "$(container "$3")" ;;
-        esac
+    inspect|diff)
+        echo "fake podman: bare '$cmd' may resolve to an image of the same name; use 'container $cmd'" >&2
+        exit 1
         ;;
     exec)
         if [ "$3" = /run/teken/start.status ]; then
@@ -96,10 +111,6 @@ case "$cmd" in
         fi
         while [ "$1" != "-c" ]; do shift; done
         FAKE_IN=live sh -c "$2"
-        ;;
-    diff)
-        cat "$(container "$1").diff" 2>/dev/null
-        true
         ;;
     *)
         echo "fake podman: unknown command $cmd" >&2
