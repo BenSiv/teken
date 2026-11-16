@@ -393,6 +393,7 @@ Exit codes: 0 done (or nothing to do), 1 failed and rolled back cleanly,
 
 ```
 src/main.lua            -- CLI
+src/help.lua            -- help text per command
 src/loader.lua          -- sandboxed loading, validation, var expansion
 src/lock.lua            -- read, check and update lock.lua
 src/hash.lua            -- generation and step ids

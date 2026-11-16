@@ -15,24 +15,8 @@ loader = require("loader")
 lock = require("lock")
 lifecycle = require("lifecycle")
 version = require("version")
-
-USAGE = """usage: tkn <command> [env.lua] [options]
-
-  plan     [env]          what switch would build and change; nothing runs
-  build    [env]          build and verify the spec's generation, no activation
-  switch   [env] [-y]     build, verify, activate, health check; roll back on failure
-           --discard-undeclared   (container) replace it even when its own
-                                  layer has changes outside declared state
-  rollback [env] [-y]     activate the previous generation
-  gens     [env]          list generations; * marks the active one
-  status   [env]          exit 2 when the active generation is not the spec's
-  lock     [env]          pin inputs not yet in lock.lua
-  update   [env] [name..] move pins forward (all, or the named sources/URLs)
-  gc                      remove generations and build steps nothing keeps
-  --version
-
-env defaults to envs/<hostname>.lua. Exit codes: 0 done, 1 failed (rolled
-back cleanly), 2 drift (status), 3 failed and could not roll back."""
+help = require("help")
+get_help_string = help.get_help_string
 
 ENV_COMMANDS = {
     plan = true, build = true, switch = true, rollback = true,
@@ -172,19 +156,27 @@ function main(args)
         print(version.describe())
         return 0
     end
-    if options.help == true or options.command == nil then
-        print(USAGE)
+    if options.command == nil then
+        print(get_help_string("tkn"))
         if options.help == true then
             return 0
         end
         return 1
     end
     command = options.command
+    if options.help == true then
+        cmd_help = get_help_string("tkn " .. command)
+        if cmd_help == nil then
+            error("unknown command " .. command .. "\n\n" .. get_help_string("tkn"), 0)
+        end
+        print(cmd_help)
+        return 0
+    end
     if command == "gc" then
         return lifecycle.gc()
     end
     if ENV_COMMANDS[command] != true then
-        error("unknown command " .. command .. "\n\n" .. USAGE, 0)
+        error("unknown command " .. command .. "\n\n" .. get_help_string("tkn"), 0)
     end
     env_path = options.env
     if env_path == nil then
