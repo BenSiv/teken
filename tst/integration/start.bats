@@ -180,7 +180,7 @@ LUA
     files = {{path = "files/v", content = "one"}},
 LUA
     touch "$WORK/sock"
-    box_env 'passenv = {"FAKE_DISPLAY", "UNSET_VAR"}, sockets = {"$WORK/sock", "\$UNSET_VAR/x"}'
+    box_env 'passenv = {"FAKE_DISPLAY", "UNSET_VAR"}, sockets = {'"\"$WORK/sock\""', "$UNSET_VAR/x"}'
     FAKE_DISPLAY=wayland-9 run "$TKN" switch envs/test.lua -y
     [ "$status" -eq 0 ]
     [[ "$output" == *"skipping socket"* ]]

@@ -70,13 +70,8 @@ function fail(where, message)
     error(where .. ": " .. message, 0)
 end
 
--- type() with booleans named "boolean" (luam calls them "flag").
 function type_name(value)
-    name = type(value)
-    if name == "flag" then
-        return "boolean"
-    end
-    return name
+    return type(value)
 end
 
 function key_list(tbl)

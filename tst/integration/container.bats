@@ -122,7 +122,7 @@ containers() {
     "$TKN" lock envs/test.lua
     "$TKN" switch envs/test.lua -y
     before=$(active)
-    tools_unit '"[ \"\$FAKE_IN\" != candidate ]"'
+    tools_unit '"[ \"$FAKE_IN\" != candidate ]"'
     run "$TKN" switch envs/test.lua -y
     [ "$status" -eq 1 ]
     [[ "$output" == *"verify failed"*"the image is kept"* ]]
@@ -134,7 +134,7 @@ containers() {
     "$TKN" lock envs/test.lua
     "$TKN" switch envs/test.lua -y
     before=$(active)
-    tools_unit '"[ \"\$FAKE_IN\" != live ]"'
+    tools_unit '"[ \"$FAKE_IN\" != live ]"'
     run "$TKN" switch envs/test.lua -y
     [ "$status" -eq 1 ]
     [[ "$output" == *"health check failed"* ]]

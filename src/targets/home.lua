@@ -76,7 +76,7 @@ function build_step(env, entry, pins, ids)
         shell.remove(entry.dir)
         error("build step '" .. step.name .. "' failed (" .. step.where .. ")", 0)
     end
-    data.write_file(entry.dir .. "/done", "")
+    shell.write_file(entry.dir .. "/done", "")
     entry.cached = true
 end
 
@@ -165,7 +165,7 @@ function assemble(env, pins, gen, steps, ids)
                 error(item.where .. ": " .. item.path .. " is already in the generation", 0)
             end
             shell.mkdir(shell.parent(dest))
-            data.write_file(dest, item.content)
+            shell.write_file(dest, item.content)
         end
         chmod(dest, item.mode)
     end
@@ -174,7 +174,7 @@ function assemble(env, pins, gen, steps, ids)
             error(item.where .. ": link target " .. item.target .. " is not in the generation", 0)
         end
     end
-    data.write_file(gen .. "/env.sh", env_script(env))
+    shell.write_file(gen .. "/env.sh", env_script(env))
 end
 
 -- Builds generation `id` and runs verify in it. A generation already

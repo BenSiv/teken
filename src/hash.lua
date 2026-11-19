@@ -1,32 +1,27 @@
--- Content hashes: generation ids, step ids, fetched files. sha256sum
--- does the hashing; ids are its first 16 hex digits, enough to be
--- unique within one store and short enough to read.
+-- Content hashes: generation ids, step ids, fetched files. Backed by
+-- Luam's in-process OpenSSL `crypto` binding and canonical `data.serialize`.
 
-shell = require("shell")
-data = require("data")
+const crypto = require("crypto")
+const data = require("data")
 
-hash = {}
+const hash = {}
 
-ID_LENGTH = 16
+const ID_LENGTH = 16
 
 function hash.file(path)
-    out = shell.must("sha256sum " .. shell.quote(path), "sha256sum " .. path)
-    return string.match(out, "^(%x+)")
-end
-
-function hash.text(text)
-    path = os.tmpname()
-    file = io.open(path, "w")
-    io.write(file, text)
-    io.close(file)
-    digest = hash.file(path)
-    os.remove(path)
+    digest, err = crypto.sha256_file(path)
+    if digest == nil then
+        error("sha256 " .. path .. " failed: " .. tostring(err), 0)
+    end
     return digest
 end
 
--- The id of a table: its canonical serialization, hashed.
+function hash.text(text)
+    return crypto.sha256(text)
+end
+
 function hash.id(value)
-    return string.sub(hash.text(data.serialize(value)), 1, ID_LENGTH)
+    return string.sub(crypto.sha256(data.serialize(value)), 1, ID_LENGTH)
 end
 
 return hash

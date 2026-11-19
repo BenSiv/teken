@@ -223,7 +223,7 @@ function assemble_context(env, pins, ctx)
     for _, step in ipairs(env.build) do
         sources.checkout(step.from, env.sources[step.from], pins.sources[step.from].commit, ctx .. "/sources/" .. step.name)
         shell.mkdir(ctx .. "/steps")
-        data.write_file(ctx .. "/steps/" .. step.name .. ".sh", step_script(step))
+        shell.write_file(ctx .. "/steps/" .. step.name .. ".sh", step_script(step))
     end
     for _, item in ipairs(env.fetch) do
         digest = pins.fetch[item.url]
@@ -242,7 +242,7 @@ function assemble_context(env, pins, ctx)
         if item.source != nil then
             shell.must("cp -a " .. shell.quote(env.spec_dir .. "/" .. item.source) .. " " .. shell.quote(dest), "copy " .. item.source)
         else
-            data.write_file(dest, item.content)
+            shell.write_file(dest, item.content)
         end
     end
 end
@@ -285,13 +285,13 @@ function container.build(env, pins, id)
         error(err, 0)
     end
     start = container.start_script(env, id)
-    data.write_file(tmp .. "/context/teken-start", start)
-    data.write_file(tmp .. "/start", start)
+    shell.write_file(tmp .. "/context/teken-start", start)
+    shell.write_file(tmp .. "/start", start)
     if shell.ok("sh -n " .. shell.quote(tmp .. "/start")) == false then
         shell.remove(tmp)
         error("the generated start script does not parse (a start entry's quoting?)", 0)
     end
-    data.write_file(tmp .. "/Containerfile", container.containerfile(env, pins, id))
+    shell.write_file(tmp .. "/Containerfile", container.containerfile(env, pins, id))
     print("building image " .. tag)
     if shell.run("podman build --tag " .. shell.quote(tag) .. " --file " .. shell.quote(tmp .. "/Containerfile")
             .. " " .. shell.quote(tmp .. "/context")) != true then

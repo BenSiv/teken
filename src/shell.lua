@@ -1,46 +1,19 @@
--- Running commands. Probes capture output and exit status; builds and
--- verify commands stream to the terminal. Every command teken runs goes
--- through here, so tests only need stub binaries on PATH.
+-- Thin shell & path facade delegating to Luam's shared `external_tool`
+-- and `paths` libraries. Every external command teken runs goes through
+-- here so integration tests can stub binaries on PATH.
 
-lfs = require("lfs")
+const ext = require("external_tool")
+const paths = require("paths")
 
-shell = {}
+const shell = {}
 
-function shell.quote(s)
-    return "'" .. string.gsub(s, "'", "'\\''") .. "'"
-end
-
--- Runs `cmd` and returns its combined stdout+stderr and whether it
--- exited 0. io.popen's close gives no exit status in luam, so the
--- status is echoed as a marker on the last line and stripped again.
-function shell.capture(cmd)
-    handle = io.popen("{ " .. cmd .. "\n} 2>&1; echo \"__rc=$?\"")
-    out = io.read(handle, "*a")
-    io.close(handle)
-    rc = string.match(out, "__rc=(%d+)%s*$")
-    out = string.gsub(out, "__rc=%d+%s*$", "")
-    return out, rc == "0"
-end
-
-function shell.ok(cmd)
-    _, ok = shell.capture(cmd)
-    return ok
-end
-
--- Like capture, but fails with the command's output when it exits
--- non-zero. For steps whose failure ends the run.
-function shell.must(cmd, what)
-    out, ok = shell.capture(cmd)
-    if ok != true then
-        error(what .. " failed:\n" .. out, 0)
-    end
-    return out
-end
+shell.quote = ext.shell_quote
+shell.capture = ext.exec
+shell.ok = ext.ok
+shell.must = ext.must
 
 function shell.trim(text)
-    text = string.gsub(text, "^%s+", "")
-    text = string.gsub(text, "%s+$", "")
-    return text
+    return string.trim(text)
 end
 
 function shell.lines(text)
@@ -51,41 +24,35 @@ function shell.lines(text)
     return result
 end
 
--- Runs `cmd` with its output going straight to the terminal.
 function shell.run(cmd)
-    status = os.execute(cmd)
-    return status == 0 or status == true
+    ok = ext.run(cmd)
+    return ok == true
 end
 
 function shell.home()
     return os.getenv("HOME")
 end
 
-function shell.parent(path)
-    parent = string.match(path, "^(.*)/[^/]+/?$")
-    if parent == nil then
-        return "."
-    end
-    if parent == "" then
-        return "/"
-    end
-    return parent
-end
-
-function shell.basename(path)
-    return string.match(path, "([^/]+)/?$")
-end
-
-function shell.exists(path)
-    return lfs.symlinkattributes(path) != nil
-end
+shell.parent = paths.get_parent_dir
+shell.basename = paths.get_file_name
+shell.exists = paths.exists
 
 function shell.mkdir(path)
-    shell.must("mkdir -p " .. shell.quote(path), "mkdir " .. path)
+    ok, err = paths.ensure_dir(path)
+    if not ok then
+        error("mkdir " .. path .. " failed:\n" .. tostring(err), 0)
+    end
+end
+
+function shell.write_file(path, text)
+    ok, err = paths.write_atomic(path, text)
+    if not ok then
+        error(tostring(err), 0)
+    end
 end
 
 function shell.remove(path)
-    shell.must("rm -rf " .. shell.quote(path), "remove " .. path)
+    ext.must("rm -rf " .. ext.shell_quote(path), "remove " .. path)
 end
 
 return shell
