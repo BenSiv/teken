@@ -18,19 +18,30 @@ export TEKEN_STATE=~/.local/state/teken-smoke
 
 ## Build tkn
 
-Needs git, gcc, make and readline headers (`libreadline-dev` /
-`readline-devel`); the container test needs podman.
+Needs git, gcc, make, readline headers (`libreadline-dev` /
+`readline-devel`), and OpenSSL headers (`libssl-dev` / `openssl-devel`
+for `-lcrypto`); the container test needs podman. Building and testing
+`tkn` requires a built [luam](../../../luam/README.md) checkout with
+`obj/liblua.a` plus `lib/lfs/lfs.so` and `lib/crypto/crypto.so` (from
+`bld/build_libs.sh` or compiled directly):
 
 ```sh
 cd ~/Projects                      # any folder; luam and teken side by side
 git clone https://github.com/BenSiv/luam && cd luam
 bash bld/build_lang.sh
-gcc -O2 -shared -fPIC -Isrc/ -o lib/lfs/lfs.so lib/lfs/src/lfs.c   # or bash bld/build_libs.sh
+gcc -O2 -shared -fPIC -Isrc/ -o lib/lfs/lfs.so lib/lfs/src/lfs.c         # or bash bld/build_libs.sh
+gcc -O2 -shared -fPIC -Isrc/ -o lib/crypto/crypto.so lib/crypto/crypto.c -lcrypto
 cd .. && git clone https://github.com/BenSiv/teken && cd teken
 ./bld/build.sh                     # -> bin/tkn
 alias tkn="$PWD/bin/tkn"
 cd tst/smoke
 ```
+
+For real-world specs beyond this minimal smoke fixture, see
+[configs/teken](../../../configs/teken/README.md) (`work.lua`,
+`personal.lua`, `devenv.lua`) and
+[software/devenv/bensiv](../../../software/devenv/bensiv/README.md)
+(`celleste-bensiv`).
 
 ## Home target
 

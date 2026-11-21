@@ -67,9 +67,6 @@ return {
         {path = "/data", volume = "celleste-bensiv-data"},
         {path = "/root/rnd", bind = "${rnd_path}"},
     },
-    secrets = {
-        github_token = {from = "env:GITHUB_TOKEN", use = "build"},
-    },
     container = {
         name = "celleste-bensiv",
         base = "ubuntu:24.04",
@@ -110,7 +107,7 @@ return {
     apt = {"build-essential", "libreadline-dev", "libsqlite3-dev"},
     sources = {
         luam = {git = "https://github.com/BenSiv/luam"},
-        brex = {git = "https://github.com/BenSiv/brain-ex"},
+        brex = {git = "https://github.com/BenSiv/brain-ex", ref = "main"},
     },
     build = {
         {name = "luam", from = "luam",
@@ -121,7 +118,7 @@ return {
          cmd = "bash bld/build.sh",
          install = {["bin/brex"] = "bin/brex"}},
     },
-    verify = {"luam -v", "brex --version"},
+    verify = {"test -x \"$TEKEN_GEN/bin/luam\"", "luam -v", "brex --version"},
 }
 ```
 
@@ -129,12 +126,12 @@ return {
 |---|---|---|
 | `apt` | Packages installed in the image | container |
 | `fetch` | Files by URL (`url`, `path`, `mode`), their sha256 pinned by the lock | both |
-| `sources` | Git repos, pinned to a commit by the lock, used by builds | both |
+| `sources` | Git repos (`git`, optional `ref` defaulting to `HEAD` -- branch, tag, or 40-char commit SHA), pinned to a commit by the lock, used by builds | both |
 | `build` | Commands run in a source; `install` copies outputs into the generation | both |
 | `files` | Files placed in the generation (`path`, then `source` in the spec or inline `content`; `mode`) | both |
 | `links` | Paths outside the generation (`path`) that point into it (`target`, relative to the generation), or into state (an absolute `target` inside a state path) | both |
 | `env` | Environment variables for the env's shell | both |
-| `verify` | Commands that must exit 0 in the built generation | both |
+| `verify` | Commands that must exit 0 in the built generation (`$TEKEN_GEN` points to the generation root: `/opt/teken` in containers, `gens/<id>` on home) | both |
 | `repos` | Checkouts (`path` inside a state path, `git`), cloned only when the path is missing | both |
 | `start` | Commands run on every container start (`name`, `cmd`, `background`) | container |
 
@@ -207,17 +204,20 @@ committed with the spec:
 ```lua
 return {
     images = {["ubuntu:24.04"] = "sha256:..."},
-    sources = {luam = {git = "https://github.com/BenSiv/luam", commit = "a1b2c3d"}},
+    sources = {
+        luam = {git = "https://github.com/BenSiv/luam", commit = "a1b2c3d..."},
+        brex = {git = "https://github.com/BenSiv/brain-ex", ref = "main", commit = "f4e5d6c..."},
+    },
     fetch = {["https://.../awscli-exe-linux-x86_64.zip"] = "sha256:..."},
 }
 ```
 
-Pinned: base image digests, git commits, URL hashes. Not pinned: apt
+Pinned: base image digests, git commits (preserving any configured `ref` so changing `ref` invalidates the old pin), URL hashes. Not pinned: apt
 package versions. They float within the pinned base image and its apt
 snapshot at build time, because mirrors drop old versions. A spec that
 needs a specific version uses `fetch` for that `.deb`.
 
-`tkn update [name...]` moves pins forward (all, or the named inputs) and
+`tkn update [env] [name...]` moves pins forward (all inputs of the env, or only the named sources/image tags/URLs plus any unpinned inputs) and
 prints what changed. `tkn plan` then shows the effect on each env.
 
 ## Target: container
@@ -358,12 +358,12 @@ for the first version. When added, they will be declared steps that run
 after a backup the spec names, during activation, and they will be part
 of rollback.
 
-## Secrets
+## Deferred / out of scope: Secrets
 
 Not built yet; env files with `secrets` are rejected until it is.
 Private git sources need no secret: they are cloned on the host.
 
-Declared per env with a source (`env:NAME`, `file:/path`,
+Planned design: declared per env with a source (`env:NAME`, `file:/path`,
 `cmd:camopass show github/work-token`) and a use (`build` or `run`).
 Build secrets go through `podman build --secret`, run secrets through
 `podman secret` or a file mounted at activation. teken never writes a
@@ -373,40 +373,54 @@ shows secrets by name only.
 ## CLI
 
 ```
-tkn plan     [env]      # what switch would build and change; nothing runs
-tkn build    [env]      # eval, lock check, build, verify; no activation
-tkn switch   [env] [-y] # the full lifecycle
-tkn rollback [env]      # activate the previous kept generation
-tkn gens     [env]      # list generations; mark the active one
-tkn status   [env]      # active id vs the id the spec would build
-tkn lock     [env]      # pin inputs not yet in lock.lua
-tkn update   [name...]  # move pins forward; print what changed
-tkn gc                  # remove generations and cached steps nothing keeps
+tkn plan     [env]                            # what switch would build and change; nothing runs (exit 0)
+tkn build    [env]                            # eval, lock check, build, verify; no activation
+tkn switch   [env] [-y] [--discard-undeclared] # the full lifecycle
+tkn rollback [env] [-y] [--discard-undeclared] # activate the previous kept generation
+tkn gens     [env]                            # list generations; * marks the active one
+tkn status   [env]                            # active id vs the id the spec would build (exit 2 on drift)
+tkn lock     [env]                            # pin inputs not yet in lock.lua
+tkn update   [env] [name...]                  # move pins forward; print what changed
+tkn gc                                        # remove generations and cached steps nothing keeps
 tkn --version
 ```
 
-Exit codes: 0 done (or nothing to do), 1 failed and rolled back cleanly,
-2 `status`/`plan` found differences, 3 failed and could not roll back
-(the message says what state it left and why).
+Exit codes: `0` done (or nothing to do; `tkn plan` always returns `0` on a
+valid spec), `1` failed (spec/lock error, cancelled, or failed and rolled
+back cleanly), `2` `tkn status` found drift (unpinned inputs or active
+generation differs from the spec), `3` failed during activation and
+automatic rollback also failed (the message says what state it left and why).
 
 ## Code layout
 
 ```
-src/main.lua            -- CLI
+bld/package.lua         -- declarative static build manifest (bin = "tkn", with = {"lfs", "crypto"}, define_git_commit = "build_commit")
+bld/build.sh            -- invokes luam's lib/static/build.lua -> bin/tkn
+bld/test.sh             -- builds bin/tkn, runs tst/unit/*.lua and tst/integration/*.bats
+src/main.lua            -- CLI argument parsing, locking, recovery, command dispatch
 src/help.lua            -- help text per command
-src/loader.lua          -- sandboxed loading, validation, var expansion
+src/version.lua         -- version check (`requires_teken`) and `build_commit` reporting
+src/loader.lua          -- sandboxed loading, validation, var expansion (via luam/lib/data.lua)
 src/lock.lua            -- read, check and update lock.lua
-src/hash.lua            -- generation and step ids
-src/data.lua            -- teken's own data files, written atomically
-src/store.lua           -- generations, history, intent records, run lock
+src/hash.lua            -- SHA-256 generation and step ids (via luam/lib/crypto)
+src/store.lua           -- generations, history, intent records, run lock (atomic I/O via luam/lib/data.lua and paths.lua)
 src/lifecycle.lua       -- the phases, rollback on failure, gc
 src/sources.lua         -- git mirrors and checkouts at pinned commits
-src/shell.lua           -- every command goes through here
+src/shell.lua           -- every external command goes through here (over luam/lib/external_tool.lua)
 src/targets/home.lua
 src/targets/container.lua
-bld/build.sh            -- static build through luam, like seder
 tst/unit/, tst/integration/  -- integration tests use local git repos and a fake podman
 ```
+
+Data serialization, sandboxed loading, and schema validation live in
+shared [luam](../../luam/README.md) `lib/data.lua` (replacing the earlier
+teken-local `src/data.lua`).
+
+## Related Repositories
+
+- [luam](../../luam/README.md) — language runtime, shared `lib/` modules (`data`, `crypto`, `external_tool`, `paths`), and `lib/static/build.lua` bundler
+- [configs/teken](../../configs/teken/README.md) — personal `teken` specs (`envs/work.lua`, `envs/personal.lua`, `envs/devenv.lua`)
+- [software/devenv/bensiv](../../software/devenv/bensiv/README.md) — Celleste work container spec (`celleste-bensiv`)
 
 A target implements:
 
