@@ -1,5 +1,4 @@
--- Content hashes: generation ids, step ids, fetched files. Backed by
--- Luam's in-process OpenSSL `crypto` binding and canonical `data.serialize`.
+-- SHA-256 digests and canonical 16-hex-char IDs over `crypto` and `data.serialize`.
 
 const crypto = require("crypto")
 const data = require("data")

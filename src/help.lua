@@ -1,5 +1,4 @@
--- CLI help text: top-level summary ("tkn") and one entry per command
--- ("tkn <command>").
+-- CLI help text for `tkn` and its subcommands.
 
 help = {}
 

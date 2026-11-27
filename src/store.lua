@@ -1,15 +1,4 @@
--- Where teken keeps what it builds. The root is $TEKEN_STATE, or
--- ~/.local/state/teken:
---
---   cache/git/<name>-<id>/   bare mirrors of git sources
---   cache/fetch/<sha256>     fetched files, by content
---   steps/<id>/tree/         a build step's finished tree (done marker: steps/<id>/done)
---   envs/<env>/gens/<id>/    generations; <id>.tmp while one is built
---   envs/<env>/current       symlink to the active generation
---   envs/<env>/history.lua   activated generations, oldest first; last is active
---   envs/<env>/intent.lua    present only while a switch is in progress
---   envs/<env>/adopted/      files that stood where a link now is
---   envs/<env>/run.lock      held while a tkn command changes this env
+-- Generation store layout, atomic `current` symlink swap, intent records, and `run.lock` (see doc/design.md).
 
 lfs = require("lfs")
 data = require("data")
@@ -61,8 +50,6 @@ function store.meta(name, id)
     return data.load(store.gen_path(name, id) .. "/meta.lua")
 end
 
--- The active generation's id, from the current symlink; nil before
--- the first switch.
 function store.active(name)
     target = lfs.symlinkattributes(store.current_path(name), "target")
     if target == nil then
@@ -71,8 +58,7 @@ function store.active(name)
     return shell.basename(target)
 end
 
--- Points current at generation `id` (nil removes it) in one rename(2):
--- the new link is made beside it and renamed over it.
+-- Atomically swap `current` symlink via `rename(2)` over `current.new`.
 function store.set_current(name, id)
     current = store.current_path(name)
     if id == nil then
@@ -116,8 +102,7 @@ function store.set_intent(name, intent)
     data.save(path, intent)
 end
 
--- Held while a command changes the env, so two tkn runs never switch
--- the same env at once. mkdir is atomic: it fails when the lock exists.
+-- Atomic per-env exclusion lock via `mkdir`.
 function store.lock(name)
     shell.mkdir(store.env_dir(name))
     path = store.env_dir(name) .. "/run.lock"
@@ -132,7 +117,6 @@ function store.unlock(name)
     lfs.rmdir(store.env_dir(name) .. "/run.lock")
 end
 
--- Generations of `name` on disk, by id.
 function store.gens(name)
     result = {}
     dir = store.gens_dir(name)
@@ -148,9 +132,7 @@ function store.gens(name)
     return result
 end
 
--- Trims history to the last `keep` entries. Returns the generations
--- that dropped out of it, for their target to remove. The active
--- generation is always the last entry.
+-- Trim `history` to the last `keep` entries and return IDs no longer referenced.
 function store.prune(name, keep)
     history = store.history(name)
     removed = {}

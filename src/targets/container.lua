@@ -1,17 +1,4 @@
--- The container target: a generation is an image, teken/<env>:<id>,
--- built by podman from a Containerfile teken generates. Inside the
--- image the generation lives at /opt/teken (bin/ on PATH, files/, ...)
--- laid out as in the home target, so the same units serve both.
--- Build steps run inside the image build, against the image's own
--- libraries; their trees stay at /opt/teken-build/<step>.
---
--- Activation swaps containers: the new one is created as <name>-next,
--- the old one is stopped and renamed to <name>-<from id>, the new one
--- takes the name and starts. Rollback undoes those renames; commit
--- removes the old container. State lives on the volumes and bind mounts
--- the env declares, which both containers share, so nothing in the old
--- container's own layer is needed after the swap -- and teken refuses
--- the swap when that layer holds changes outside declared state.
+-- `container` target: OCI image generations (`teken/<env>:<id>`) swapped via Podman container renames (see doc/design.md).
 
 lfs = require("lfs")
 data = require("data")
@@ -26,8 +13,7 @@ container = {}
 ROOT = "/opt/teken"
 BUILD = "/opt/teken-build"
 
--- Paths a container may change in its own layer without that being
--- lost work.
+-- Overlay paths ignored during `undeclared` drift checks.
 SCRATCH = {"/tmp", "/run", "/var/tmp", "/var/cache", "/var/log", "/dev", "/proc", "/sys",
     "/etc/hostname", "/etc/hosts", "/etc/resolv.conf"}
 
@@ -43,7 +29,6 @@ function exists(name)
     return shell.ok("podman container exists " .. shell.quote(name))
 end
 
--- The generation a container was created from, by its image's label.
 function generation_of(name)
     out = podman("container inspect --format '{{index .Config.Labels \"teken.id\"}}' " .. shell.quote(name), "podman inspect " .. name)
     return shell.trim(out)
@@ -57,8 +42,7 @@ function json_string(text)
     return "\"" .. text .. "\""
 end
 
--- An ENV value: double-quoted, with $ escaped so podman does not
--- substitute it at build time.
+-- Escape `$` so Podman does not expand variables at image build time.
 function env_value(text)
     return (string.gsub(json_string(text), "%$", "\\$"))
 end
@@ -84,9 +68,6 @@ function step_script(step)
     return table.concat(lines, "\n") .. "\n"
 end
 
--- The Containerfile for generation `id`. It reads only the build
--- context assemble_context lays out: sources/<step>, steps/<step>.sh,
--- fetch/<sha256>, files/<path>.
 function container.containerfile(env, pins, id)
     c = env.container
     lines = {
@@ -144,8 +125,6 @@ function container.containerfile(env, pins, id)
     return table.concat(lines, "\n") .. "\n"
 end
 
--- A link target must be something the generation contains: a path an
--- install, fetch or file puts there, or a path inside one of those.
 function check_link_targets(env)
     paths = {}
     for _, step in ipairs(env.build) do
@@ -160,7 +139,6 @@ function check_link_targets(env)
         table.insert(paths, item.path)
     end
     for _, link in ipairs(env.links) do
-        -- An absolute target is in state; the loader checked that.
         found = string.sub(link.target, 1, 1) == "/"
         for _, path in ipairs(paths) do
             if link.target == path or string.sub(link.target, 1, string.len(path) + 1) == path .. "/" then
@@ -173,13 +151,7 @@ function check_link_targets(env)
     end
 end
 
--- The image's entrypoint, run on every container start: creates the
--- state paths, clones missing repos into them, runs the start entries
--- (background ones detached, logged to $TEKEN_LOGS/<name>.log), then
--- execs the container's command. Its outcome goes to
--- $TEKEN_RUN/start.status (running, done or failed), which the health
--- check waits for. Every step must be idempotent: it runs again on
--- every restart.
+-- Generate idempotent `/opt/teken/start` entrypoint writing `running`/`done`/`failed` to `start.status`.
 function container.start_script(env, id)
     q = shell.quote
     lines = {
@@ -251,8 +223,7 @@ function verify_prefix()
     return "-e TEKEN_GEN=" .. ROOT .. " "
 end
 
--- Runs each verify command in a throwaway container of `tag`, with no
--- state mounted, so a candidate never touches live data.
+-- Verify candidate image in `--rm` container with no state volumes mounted.
 function verify_image(env, tag)
     for _, cmd in ipairs(env.verify) do
         print("  ? " .. cmd)
@@ -267,8 +238,6 @@ function container.has_gen(name, id)
     return store.has_gen(name, id) and shell.ok("podman image exists " .. shell.quote(container.tag(name, id)))
 end
 
--- Builds the image for generation `id` and verifies it. gens/<id>/
--- (the Containerfile and meta.lua) appears only once both succeeded.
 function container.build(env, pins, id)
     tag = container.tag(env.name, id)
     if container.has_gen(env.name, id) then
@@ -320,11 +289,7 @@ function inside(path, dir)
     return path == dir or string.sub(path, 1, string.len(dir) + 1) == dir .. "/"
 end
 
--- How generation `id` runs: its container section, state and verify
--- commands as recorded at build time, so activating an older
--- generation (rollback) uses its own name, mounts and checks, not the
--- current spec's. `has_start`: the image runs /opt/teken/start (built
--- by teken 0.3.0 or later), so the health check waits for it.
+-- Read runtime config from generation `id`'s `meta.lua` so rollbacks match their own build.
 function run_of(env, id)
     meta = store.meta(env.name, id)
     if meta == nil or meta.container == nil then
@@ -333,10 +298,7 @@ function run_of(env, id)
     return {container = meta.container, state = meta.state, verify = meta.verify, has_start = meta.has_start == true}
 end
 
--- Changes in the running container's own layer that a swap would lose:
--- everything podman diff reports outside declared state, `ephemeral`
--- and SCRATCH, minus directories listed only because something below
--- them changed. `env` needs only `container` and `state`.
+-- List overlay changes outside `state`, `ephemeral`, and `SCRATCH` (`podman container diff` avoids image-name collisions).
 function container.undeclared(env, name)
     allowed = {}
     for _, path in ipairs(SCRATCH) do
@@ -351,8 +313,6 @@ function container.undeclared(env, name)
         end
     end
     changed = {}
-    -- `container diff`: a bare `podman diff` takes an image of the same
-    -- name (a container's old image often has one) over the container.
     for _, line in ipairs(shell.lines(podman("container diff " .. shell.quote(name), "podman diff " .. name))) do
         path = string.match(line, "^[ACD]%s+(/.*)$")
         if path != nil then
@@ -387,7 +347,6 @@ function container.undeclared(env, name)
     return result
 end
 
--- $NAME and ${NAME} from tkn's own environment; nil when one is unset.
 function host_expand(text)
     missing = false
     result = string.gsub(text, "%$({?)([%a_][%w_]*)(}?)", function(open, name, close)
@@ -428,8 +387,7 @@ function create_args(env_name, run, tag)
         end
         table.insert(args, "--volume " .. shell.quote(source .. ":" .. state.path))
     end
-    -- Host values, read when the container is created: they belong to
-    -- the session running tkn, not to the generation.
+    -- Resolve `passenv` and `sockets` from current host session at container creation time.
     if c.passenv != nil then
         for _, name in ipairs(c.passenv) do
             value = os.getenv(name)
@@ -461,10 +419,6 @@ function is_running(name)
     return shell.trim(podman("container inspect --format '{{.State.Running}}' " .. shell.quote(name), "podman inspect " .. name)) == "true"
 end
 
--- Waits until the entrypoint (/opt/teken/start) reports done, for at
--- most `c.start_timeout` seconds (`c`: the generation's container
--- section). A failed start, or a container that stopped, fails the
--- health check.
 function wait_for_start(c, name)
     waited = 0
     while true do
@@ -545,9 +499,6 @@ function container.activate(env, from, to, options)
     end
 end
 
--- Undoes an activation recorded as {from, to}, from any point it
--- reached: the new container gone, the old one back under its name and
--- running.
 function container.rollback(env, intent)
     name = run_of(env, intent.to).container.name
     if exists(name .. "-next") then
@@ -569,8 +520,6 @@ function container.rollback(env, intent)
     store.set_current(env.name, intent.from)
 end
 
--- After a successful switch the old container is no longer needed:
--- `tkn rollback` makes a new one from the previous image.
 function container.commit(env, from, to)
     if from == nil then
         return
@@ -586,8 +535,7 @@ function container.remove(name, id)
     shell.remove(store.gen_path(name, id))
 end
 
--- For tkn plan: build steps run inside the image build, where podman's
--- layer cache decides what reruns, so all are listed as to build.
+-- Podman's layer cache decides step reuse during `podman build`.
 function container.steps(env, pins)
     result = {}
     for _, step in ipairs(env.build) do
@@ -596,7 +544,6 @@ function container.steps(env, pins)
     return result
 end
 
--- Links are part of the image, not a set changed on the host.
 function container.link_changes(env, from)
     return {}
 end

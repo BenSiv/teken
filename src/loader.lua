@@ -1,8 +1,4 @@
--- Loads an env file and its units into one resolved env the targets
--- build from. Files are data, not code: each runs in luam's data-only
--- sandbox and must return a table. Every field is checked (unknown
--- keys, wrong types, fields the env's target can't use, duplicates
--- across units) before anything runs.
+-- Sandboxed env and unit loader, schema validator, and var expander (see doc/design.md).
 
 data = require("data")
 shell = require("shell")
@@ -17,9 +13,6 @@ ENV_KEYS = {
 
 BOTH = {home = true, container = true}
 
--- Unit fields and the targets that can use them. Everything but apt
--- and start works for both, so a unit (luam-stack, dotfiles) serves a
--- home env and a container env alike.
 UNIT_FIELDS = {
     apt = {container = true},
     sources = BOTH,
@@ -35,7 +28,6 @@ UNIT_FIELDS = {
 
 TARGETS = {home = true, container = true}
 
--- The container section of a container env.
 CONTAINER_FIELDS = {
     name = "string", base = "string", hostname = "string", ports = "table",
     tty = "boolean", restart = "string", command = "table", home = "string",
@@ -90,10 +82,7 @@ function load_table(path)
     return value
 end
 
--- ${name} -> vars[name]; then a leading ~/ -> `tilde`/ (the env's home:
--- the user's for a home env, the container's for a container env), or
--- no ~ expansion when `tilde` is false. ${build.<step>} is left for the
--- build, which alone knows where a step's tree is.
+-- Expand `${name}` from `vars` and leading `~` to `tilde` (unless `tilde == false`); leave `${build.<step>}` for target build.
 function expand_string(value, vars, where, tilde)
     if tilde == nil then
         tilde = vars.home
@@ -177,7 +166,6 @@ function check_string_list(tbl, where)
     end
 end
 
--- A path inside a generation: relative, no "..".
 function check_relative(path, where)
     if string.sub(path, 1, 1) == "/" or string.find(path, "%.%.") != nil then
         fail(where, "'" .. path .. "' must be a relative path inside the generation")
@@ -202,8 +190,6 @@ function new_env(name, path, spec_dir, target)
     }
 end
 
--- Adds one unit's items to the env, checking each and refusing a name
--- or path two units both claim.
 function merge_unit(env, unit, unit_path, vars)
     for field, value in pairs(unit) do
         targets = UNIT_FIELDS[field]
@@ -278,7 +264,6 @@ function merge_unit(env, unit, unit_path, vars)
     end
 end
 
--- Whether `path` is a declared state path or inside one.
 function in_state(env, path)
     for _, state in ipairs(env.state) do
         if inside(path, state.path) then
@@ -288,9 +273,7 @@ function in_state(env, path)
     return false
 end
 
--- Checks that need the whole env: build steps name known sources and
--- earlier steps, ${build.x} only refers to a step listed in needs,
--- and nothing teken writes lands inside declared state.
+-- Validate cross-unit build dependencies, `${build.<step>}` refs, and state/generation path separation.
 function check_env(env)
     built = {}
     for _, step in ipairs(env.build) do
@@ -340,8 +323,6 @@ function check_env(env)
     end
     for _, item in ipairs(env.links) do
         check_absolute(item.path, item.where)
-        -- A relative target is in the generation; an absolute one must be
-        -- in declared state (a checkout, a data directory).
         if string.sub(item.target, 1, 1) == "/" then
             if in_state(env, item.target) == false then
                 fail(item.where, "link target " .. item.target .. " is absolute but not inside a state path")
@@ -357,7 +338,6 @@ function check_env(env)
     end
 end
 
--- Checkouts: absolute, inside state, one per path.
 function check_repos(env)
     for _, item in ipairs(env.repos) do
         check_absolute(item.path, item.where)
@@ -367,9 +347,7 @@ function check_repos(env)
     end
 end
 
--- State paths. A container env keeps each on a named `volume` or a
--- `bind` mount of a host path; a ~ in `bind` is the host's home, not
--- the container's.
+-- Expand `state.bind` `~` against host `$HOME` rather than `container.home`.
 function load_state(raw, env, vars)
     if data.is_list(raw) == false then
         fail(env.path, "'state' must be a list")
@@ -434,16 +412,11 @@ function load_container(raw, env_path)
     return raw
 end
 
--- Built-in vars. ${home} and ~ are where the env lives: the user's home
--- for a home env, the container's (container.home, default /root) for a
--- container env.
 function builtin_vars(name, home)
     uid = shell.trim(shell.must("id -u", "id -u"))
     return {home = home, user = os.getenv("USER"), uid = uid, env = name}
 end
 
--- Loads envs/<name>.lua and the units it lists from units/ beside
--- envs/. Returns the resolved env.
 function loader.load(env_path)
     raw = load_table(env_path)
     for key, value in pairs(raw) do
@@ -454,8 +427,7 @@ function loader.load(env_path)
             fail(env_path, "'" .. key .. "' must be a " .. ENV_KEYS[key])
         end
     end
-    -- Checked first: a spec written for a newer teken would otherwise
-    -- fail on whatever new feature it uses, with a less helpful message.
+    -- Check requires_teken before validating newer fields.
     if raw.requires_teken != nil then
         if version.parse(raw.requires_teken) == nil then
             fail(env_path, "requires_teken must look like 0.1.0")
@@ -497,8 +469,7 @@ function loader.load(env_path)
             vars[key] = value
         end
     end
-    -- Vars may refer to each other. A ~ in a var stays until the var is
-    -- used, since it means a different home in a bind mount.
+    -- Defer `~` expansion in `vars` so `bind` and env paths resolve against their own home.
     for key, value in pairs(vars) do
         vars[key] = expand_string(value, vars, env_path .. ": var " .. key, false)
     end

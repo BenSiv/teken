@@ -1,9 +1,4 @@
--- lock.lua pins every input that can change under the same spec: the
--- digest of each base image, the commit of each git source and the
--- sha256 of each fetched URL. Only
--- `tkn lock` (pin what is missing) and `tkn update` (move pins
--- forward) write it; every other command refuses to build from an
--- input that is not pinned.
+-- Input pin resolution and `lock.lua` I/O for images, git sources, and fetched URLs.
 
 data = require("data")
 shell = require("shell")
@@ -39,12 +34,11 @@ function lock.write(spec_dir, pins)
     data.save(lock.path(spec_dir), pins, HEADER)
 end
 
--- A source's pin still holds when it names the same repo and ref.
+-- Pin remains valid only when both `git` URL and configured `ref` match.
 function source_pinned(pin, source)
     return pin != nil and pin.git == source.git and pin.ref == source.ref
 end
 
--- Inputs of `env` that `pins` does not cover, as "kind name" strings.
 function lock.missing(env, pins)
     result = {}
     if env.container != nil and pins.images[env.container.base] == nil then
@@ -71,8 +65,6 @@ function lock.require_pinned(env, pins)
     end
 end
 
--- The commit `ref` (default HEAD) points at in the remote. A ref that
--- already is a full commit hash pins to itself.
 function resolve_commit(source)
     ref = source.ref
     if ref == nil then
@@ -90,7 +82,6 @@ function resolve_commit(source)
     return commit
 end
 
--- The digest `image` (a name:tag) points at in its registry now.
 function resolve_digest(image)
     shell.must("podman pull --quiet " .. shell.quote(image), "podman pull " .. image)
     out = shell.must("podman image inspect --format '{{.Digest}}' " .. shell.quote(image), "podman image inspect " .. image)
@@ -101,7 +92,6 @@ function resolve_digest(image)
     return digest
 end
 
--- Downloads `url` into the fetch cache and returns its sha256.
 function lock.download(url)
     dir = store.cache_dir("fetch")
     tmp = dir .. "/download.tmp"
@@ -111,10 +101,6 @@ function lock.download(url)
     return digest
 end
 
--- Pins `env`'s inputs into `pins`. Without `update`, only inputs not yet
--- pinned are resolved; with it, the inputs named in `names` (all when
--- empty) move to what their ref and URL point at now. Returns the list
--- of changes, "name: old -> new".
 function lock.pin(env, pins, update, names)
     wanted = {}
     for _, name in ipairs(names) do

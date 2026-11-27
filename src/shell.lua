@@ -1,6 +1,4 @@
--- Thin shell & path facade delegating to Luam's shared `external_tool`
--- and `paths` libraries. Every external command teken runs goes through
--- here so integration tests can stub binaries on PATH.
+-- Command and atomic-path wrapper over `external_tool` and `paths`.
 
 const ext = require("external_tool")
 const paths = require("paths")

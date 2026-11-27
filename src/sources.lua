@@ -1,8 +1,4 @@
--- Git sources: a bare mirror per source in the store's cache, and
--- checkouts of it at a pinned commit. Both targets build from these;
--- the container target copies the checkout into the image's build
--- context, so private repos are cloned with the host's credentials and
--- no token ever reaches the image.
+-- Host-cached bare git mirrors and detached commit checkouts (see doc/design.md).
 
 lfs = require("lfs")
 shell = require("shell")
@@ -11,10 +7,7 @@ store = require("store")
 
 sources = {}
 
--- A bare mirror of `source` holding `commit`, fetched only when the
--- commit is not there yet. --no-local: git refuses hardlinked clones of
--- local paths across some directories, and a mirror must not share
--- objects with the repo it mirrors anyway.
+-- `--no-local` avoids cross-directory hardlink errors and keeps mirror objects isolated.
 function sources.mirror(name, source, commit)
     dir = store.cache_dir("git") .. "/" .. name .. "-" .. hash.id(source.git)
     if lfs.attributes(dir) == nil then
@@ -31,8 +24,7 @@ function sources.mirror(name, source, commit)
     return dir
 end
 
--- A fresh checkout of source `name` at `commit` in `dir`, with its own
--- .git so builds that ask git about themselves (git describe) work.
+-- Detached checkout with its own `.git` so build scripts running `git describe` succeed.
 function sources.checkout(name, source, commit, dir)
     mirror = sources.mirror(name, source, commit)
     shell.must("git clone --quiet --no-hardlinks --no-checkout " .. shell.quote(mirror) .. " " .. shell.quote(dir)

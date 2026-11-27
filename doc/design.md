@@ -99,6 +99,16 @@ otherwise the env's (the user's for a home env, `container.home` for a
 container env). A `~` inside a var stays until the var is used, so one
 var can serve both sides.
 
+`requires_teken` is checked before validating any other field so specs
+written for a newer teken fail with a clear upgrade prompt; bump `src/version.lua`
+whenever specs gain a new target, field, or built-in var:
+
+| Version | Spec additions |
+|---|---|
+| `0.1.0` | `home` target (`sources`, `build`, `fetch`, `files`, `links`, `env`, `verify`) |
+| `0.2.0` | `container` target (`container` section, `apt`, `volume`/`bind` state) |
+| `0.3.0` | Runtime `start`, `repos`, links into state, `container.{passenv,sockets,start_timeout}` |
+
 ## Unit files
 
 ```lua
@@ -151,10 +161,14 @@ their inputs instead.
 
 ### Sources and state are different things
 
-`sources` are read-only inputs: teken clones them at the locked commit to
-build from. The checkouts you work in (`~/software`, worktrees) are
-**state**: they live on a declared volume, and teken never touches them
-after the first clone (see [State](#state)).
+`sources` are read-only inputs: teken maintains one bare git mirror per
+source in `cache/git/<name>-<id>` (`git clone --no-local --mirror`, avoiding
+cross-directory hardlink failures and object sharing, fetched lazily only when
+`git cat-file -e <commit>^{commit}` misses) and checks out each build tree via
+`git clone --no-hardlinks --no-checkout` plus detached `checkout <commit>` so
+build scripts calling `git describe` see a standalone `.git`. The checkouts you
+work in (`~/software`, worktrees) are **state**: they live on a declared
+volume, and teken never touches them after the first clone (see [State](#state)).
 
 ## Lifecycle
 
@@ -189,12 +203,14 @@ even after the spec has moved on.
 
 ### Intent records and crash recovery
 
-Before activating, teken writes `activating: <from> -> <to>` to the
-target's store. It is removed at commit or after rollback. If teken finds
-one at startup (power loss, killed process), it finishes the rollback to
-`<from>` before doing anything else and reports what it did. Activation
-steps are written so this is always possible: nothing is deleted until
-commit.
+Before activating, teken writes `activating: <from> -> <to>` (`envs/<env>/intent.lua`) to the
+target's store. It is removed at commit or after rollback. Every env command
+acquires an atomic directory lock (`mkdir envs/<env>/run.lock`) and, if it finds
+an intent record at startup (power loss, killed process), finishes the rollback
+to `<from>` before doing anything else and reports what it did (`tkn gc` refuses
+to run while any env holds an intent record, and keeps `cache/git` and
+`cache/fetch` across garbage collection). Activation steps are written so this
+is always possible: nothing is deleted until commit.
 
 ## Lock
 
@@ -435,6 +451,14 @@ A target implements:
 | `steps(env, pins)`, `link_changes(env, from)` | What `tkn plan` shows |
 
 Adding a target (a bootc host, a remote machine) means adding one module.
+
+## Deliberate tradeoffs
+
+- **`podman container diff` and parent-directory filtering (`src/targets/container.lua`):** A bare `podman diff <name>` resolves an image of the same name ahead of the container. `container.undeclared` explicitly invokes `podman container diff` and drops parent directories reported only because a descendant inside declared `state`, `container.ephemeral`, or scratch paths (`/tmp`, `/run`, `/var/tmp`, `/var/cache`, `/var/log`, `/dev`, `/proc`, `/sys`, `/etc/{hostname,hosts,resolv.conf}`) changed.
+- **Escaping `$` in Containerfile `ENV` lines (`src/targets/container.lua`):** Generated `ENV` values escape `$` as `\$` so Podman preserves literal `$` references instead of substituting build-time variables.
+- **In-place `home` step trees and completion markers (`src/targets/home.lua`):** `home` build steps compile directly at their permanent store path (`steps/<id>/tree`) because compiled binaries may record RPATHs or build paths; a step counts as cached only after `steps/<id>/done` is written at the end.
+- **Convergent link switching and non-destructive file adoption (`src/targets/home.lua`):** `switch_links` converges idempotently whether re-run forward or reversed (`from`/`to` swapped during crash recovery). Pre-existing non-teken files at link paths are moved to `envs/<env>/adopted/` (`/` encoded as `%`) rather than deleted, and restored when the link is dropped or rolled back.
+- **POSIX `uname -n` and static `build_commit` (`src/main.lua`, `src/version.lua`):** Default `envs/<uname -n>.lua` lookup avoids `hostname` (absent on minimal distros), and `src/version.lua` keeps a literal `require("build_commit")` inside `pcall` so Luam's static bundler embeds the build commit while source runs still work.
 
 ## Not in scope
 

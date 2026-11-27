@@ -1,10 +1,4 @@
--- The home target: a generation is a directory in the store (bin/,
--- files/, env.sh, meta.lua), and the active one is whatever the env's
--- `current` symlink points at. Declared links point through `current`,
--- so the content of every link and every binary on PATH changes in the
--- one rename that moves `current`. Which links exist is not atomic:
--- links are placed and dropped after that rename, and rollback undoes
--- both from the intent record (see doc/design.md, "The link set").
+-- `home` target: store-backed generation directories switched via `current` symlink (see doc/design.md).
 
 lfs = require("lfs")
 data = require("data")
@@ -17,10 +11,6 @@ version = require("version")
 
 home = {}
 
--- Build steps, each with its id: the step as declared, its source at
--- the pinned commit, and the ids of the steps it needs. Equal inputs
--- give the same id, so a finished step is reused by every generation
--- and env that declares it the same way.
 function home.steps(env, pins)
     ids = {}
     result = {}
@@ -50,10 +40,7 @@ function expand_build_refs(text, ids)
     end))
 end
 
--- Runs one build step in a fresh checkout at the pinned commit. The
--- tree is built where it will stay (steps/<id>/tree), since builds may
--- record their own path; steps/<id>/done, written last, is what makes it
--- count as finished.
+-- Build in place at `steps/<id>/tree` so embedded build paths stay valid; mark `done` last.
 function build_step(env, entry, pins, ids)
     step = entry.step
     if entry.cached == true then
@@ -86,14 +73,10 @@ function chmod(path, mode)
     end
 end
 
--- An absolute target is in declared state (a checkout); a relative one
--- is in the generation and goes through current.
 function is_state_target(target)
     return string.sub(target, 1, 1) == "/"
 end
 
--- Copies `from` to `gen`/`to`, refusing to overwrite: two declarations
--- writing the same generation path is a spec error.
 function place(gen, from, to, where)
     dest = gen .. "/" .. to
     if lfs.symlinkattributes(dest) != nil then
@@ -115,8 +98,6 @@ function env_script(env)
     return table.concat(lines, "\n") .. "\n"
 end
 
--- Runs `verify` against generation directory `gen`, its bin/ first on
--- PATH and `vars` set. Returns the first failing command, or nil.
 function run_verify(verify, vars, gen)
     prefix = ""
     for _, name in ipairs(data.sorted_keys(vars)) do
@@ -177,10 +158,7 @@ function assemble(env, pins, gen, steps, ids)
     shell.write_file(gen .. "/env.sh", env_script(env))
 end
 
--- Builds generation `id` and runs verify in it. A generation already
--- built is reused. The build happens in gens/<id>.tmp, renamed only
--- when every step and every verify command succeeded; a build failure
--- removes it, a verify failure keeps it for inspection.
+-- Stage in `gens/<id>.tmp` and rename on success; keep `.tmp` on verify failure for inspection.
 function home.build(env, pins, id)
     final = store.gen_path(env.name, id)
     if store.has_gen(env.name, id) then
@@ -222,8 +200,6 @@ function home.build(env, pins, id)
     return final
 end
 
--- Links --------------------------------------------------------------
-
 function link_target(name, target)
     if is_state_target(target) then
         return target
@@ -231,8 +207,6 @@ function link_target(name, target)
     return store.current_path(name) .. "/" .. target
 end
 
--- Whether the link at `link.path` is one teken placed: through current,
--- or straight at the link's own state target.
 function is_ours(name, link)
     target = lfs.symlinkattributes(link.path, "target")
     if target == nil then
@@ -254,8 +228,7 @@ function move(from, to)
     shell.must("mv -T " .. shell.quote(from) .. " " .. shell.quote(to), "move " .. from)
 end
 
--- Makes `link.path` point through current to `link.target`. Whatever
--- else stands there is moved to adopted/, never deleted.
+-- Move pre-existing non-teken files into `adopted/` rather than deleting them.
 function place_link(name, link)
     want = link_target(name, link.target)
     if lfs.symlinkattributes(link.path, "target") == want then
@@ -280,8 +253,6 @@ function place_link(name, link)
     end
 end
 
--- Removes our link at `link.path` and puts back what it adopted, if
--- anything.
 function drop_link(name, link)
     path = link.path
     if is_ours(name, link) then
@@ -305,10 +276,7 @@ function links_of(name, id)
     return meta.links
 end
 
--- Moves the link set from generation `from`'s to `to`'s: every link of
--- `to` placed, every link only `from` had dropped. Running it again, or
--- with from and to swapped, converges, which is what makes rollback
--- after a crash safe.
+-- Convergent link-set transition (idempotent when retried or reversed on rollback).
 function switch_links(name, from, to)
     wanted = {}
     for _, link in ipairs(links_of(name, to)) do
@@ -322,11 +290,6 @@ function switch_links(name, from, to)
     end
 end
 
--- Activation ---------------------------------------------------------
-
--- Clones each repo whose path is missing. Never touches an existing
--- checkout; a failed clone is a warning (the next switch retries), not
--- a reason to roll back.
 function clone_repos(repos)
     for _, repo in ipairs(repos) do
         if lfs.symlinkattributes(repo.path) == nil then
@@ -339,10 +302,7 @@ function clone_repos(repos)
     end
 end
 
--- The state, repos, verify commands and vars are the ones recorded in
--- the generation, not the spec's: a rollback activates the old
--- generation as it was built, and checks it against what it was built
--- to pass.
+-- Activate using `to`'s recorded `meta.lua` so rollbacks run against their own build metadata.
 function home.activate(env, from, to)
     meta = store.meta(env.name, to)
     if meta.state != nil then
@@ -368,8 +328,6 @@ function home.activate(env, from, to)
     end
 end
 
--- Undoes an activation recorded as {from, to}, from any point it
--- reached: current points back at `from` and the link set is `from`'s.
 function home.rollback(env, intent)
     name = env.name
     if intent.from == nil then
@@ -389,7 +347,6 @@ function home.remove(name, id)
     shell.remove(store.gen_path(name, id))
 end
 
--- What a switch from `from` to the env's declared links would change.
 function home.link_changes(env, from)
     old = {}
     for _, link in ipairs(links_of(env.name, from)) do

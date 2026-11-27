@@ -1,17 +1,7 @@
--- teken's version. Bump the minor number whenever spec files gain
--- something an older teken can't read (a field, a target, a built-in
--- var), so env files can require it with `requires_teken`.
---
---   0.1.0  home target: sources, build, fetch, files, links, env, verify
---   0.2.0  container target: container section, apt, volume/bind state
---   0.3.0  runtime start: repos, links into state, start, container
---          passenv/sockets/start_timeout
-
+-- Spec/engine version checked by `requires_teken` (see doc/design.md).
 version = {number = "0.3.0"}
 
--- The commit the binary was built from; bld/build.sh writes
--- src/build_commit.lua (untracked). A run from source has none. The
--- require stays literal so luam's static bundler finds the module.
+-- Keep literal `require("build_commit")` so Luam's static bundler embeds it.
 ok, commit = pcall(function() return require("build_commit") end)
 if ok == true and type(commit) == "string" then
     version.commit = commit
@@ -25,7 +15,6 @@ function version.parse(text)
     return {tonumber(major), tonumber(minor), tonumber(patch)}
 end
 
--- True when this teken is at least `wanted` ("major.minor.patch").
 function version.satisfies(wanted)
     have = version.parse(version.number)
     want = version.parse(wanted)

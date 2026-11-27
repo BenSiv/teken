@@ -1,12 +1,4 @@
--- The phases every target goes through:
---
---   eval -> lock -> build -> verify -> activate -> health -> commit
---
--- Up to verify, nothing outside the store changes. Activation starts by
--- writing an intent record {from, to}; any failure from there on rolls
--- back to `from`, and the record is removed only at commit or after a
--- clean rollback. A record found at startup means a switch was
--- interrupted, so it is rolled back before anything else runs.
+-- Generation lifecycle: eval -> lock -> build -> verify -> activate -> health -> commit (see doc/design.md).
 
 lfs = require("lfs")
 data = require("data")
@@ -23,7 +15,6 @@ lifecycle.targets = {
     container = require("targets.container"),
 }
 
--- Exit codes (see doc/design.md, CLI).
 lifecycle.FAILED = 1
 lifecycle.DRIFT = 2
 lifecycle.STUCK = 3
@@ -46,9 +37,7 @@ function without_where(items)
     return result
 end
 
--- The generation id: everything that decides what is built, and
--- nothing else. Source pins and fetched-file digests stand in for their
--- contents; spec files copied in by `files` are hashed directly.
+-- Content hash of resolved spec, pinned digests/commits, copied spec files, and teken version.
 function lifecycle.generation_id(env, pins)
     sources = {}
     for name, source in pairs(env.sources) do
@@ -78,7 +67,6 @@ function lifecycle.generation_id(env, pins)
     })
 end
 
--- Rolls back a switch that was interrupted (a crash, a killed tkn).
 function lifecycle.recover(env)
     intent = store.intent(env.name)
     if intent == nil then
@@ -93,9 +81,6 @@ function lifecycle.recover(env)
     store.set_intent(env.name, nil)
 end
 
--- Everything `tkn plan` and `tkn status` report, without changing
--- anything. `missing` lists unpinned inputs; when there are any, the
--- generation id can't be computed yet.
 function lifecycle.plan(env)
     pins = lock.read(env.spec_dir)
     result = {env = env, active = store.active(env.name), missing = lock.missing(env, pins)}
@@ -152,9 +137,7 @@ function lifecycle.build(env)
     return id
 end
 
--- Activates generation `to`, rolling back on any failure. Returns 0,
--- FAILED (rolled back cleanly) or STUCK (rollback failed too; the
--- intent record stays so the next run tries again).
+-- Write intent `{from, to}`, activate, and roll back on failure (keep intent if rollback fails).
 function activate(env, from, to, options)
     target = target_of(env)
     store.set_intent(env.name, {from = from, to = to})
@@ -179,9 +162,6 @@ function activate(env, from, to, options)
     return lifecycle.FAILED
 end
 
--- After a successful activation: the target drops what it kept for
--- rollback, history records the new generation, the intent record
--- goes, and generations beyond `keep` are removed.
 function commit(env, from, to, history)
     target = target_of(env)
     if target.commit != nil then
@@ -194,7 +174,6 @@ function commit(env, from, to, history)
     end
 end
 
--- The full lifecycle. `id` is what lifecycle.build returned.
 function lifecycle.switch(env, id, options)
     from = store.active(env.name)
     if from == id then
@@ -212,7 +191,6 @@ function lifecycle.switch(env, id, options)
     return 0
 end
 
--- Activates the generation before the active one in history.
 function lifecycle.rollback(env, options)
     history = store.history(env.name)
     active = store.active(env.name)
@@ -247,10 +225,7 @@ function list_dir(dir)
     return result
 end
 
--- Across the whole store: removes generations no longer in their env's
--- history (built but never activated, or pruned) and build steps no kept
--- generation uses. Fetch and git caches stay: they are inputs, and
--- cheap to keep compared with fetching again.
+-- Remove unreferenced generations and build steps; keep git and fetch caches.
 function lifecycle.gc()
     used_steps = {}
     gens = 0

@@ -1,5 +1,4 @@
--- tkn: builds environments from a spec and switches to them all at once
--- or not at all. See doc/design.md.
+-- CLI entry point, per-env lock acquisition, and crash recovery (see doc/design.md).
 
 if package.preload["lifecycle"] == nil then
     script_dir = string.match(arg[0], "^(.*/)")
@@ -183,8 +182,7 @@ function main(args)
         env_path = default_env()
     end
     env = loader.load(env_path)
-    -- Every env command holds the env's run lock and first finishes off
-    -- an interrupted switch, so it always sees a consistent env.
+    -- Serialize per-env mutations and finish any interrupted switch before running.
     store.lock(env.name)
     ok, result = pcall(function()
         lifecycle.recover(env)
